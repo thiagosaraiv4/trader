@@ -1,0 +1,25 @@
+# Session state (financial data — never commit)
+session.json
+
+# Logs
+logs/
+bot.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Environment
+.env
+bot.pid
+
+# IDE
+.vscode/
+.idea/
+
+# Backtest artifacts (large files)
+backtest_log.txt
+backtest_log.zip
+backtest_output.log
