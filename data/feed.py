@@ -189,30 +189,72 @@ class SimulatedProvider:
 
 class CcxtProvider:
     """
-    Market data provider backed by ccxt (Binance).
+    Market data provider backed by ccxt with automatic exchange fallback.
+
+    Tries exchanges in order: binance → bybit → kraken.
+    If one fails (e.g. geo-restriction HTTP 451 from US-based servers),
+    automatically falls back to the next available exchange.
 
     Lazy-initializes the exchange instance on first use.
     """
 
+    # Fallback chain: try in order until one works
+    _EXCHANGE_CHAIN: tuple[str, ...] = ("binance", "bybit", "kraken")
+
     def __init__(self) -> None:
         self._log = get_logger(__name__, component="ccxt_provider")
         self._exchange: Any = None
+        self._exchange_id: str = ""
 
     def _ensure_exchange(self) -> Any:
-        """Lazy-init the ccxt exchange instance."""
-        if self._exchange is None:
+        """Lazy-init the ccxt exchange instance with fallback chain."""
+        if self._exchange is not None:
+            return self._exchange
+
+        try:
+            import ccxt  # type: ignore[import-untyped]
+        except ImportError as e:
+            raise ImportError(
+                "ccxt is required for market data: pip install ccxt"
+            ) from e
+
+        last_error: Exception | None = None
+        for exchange_id in self._EXCHANGE_CHAIN:
             try:
-                import ccxt  # type: ignore[import-untyped]
-            except ImportError as e:
-                raise ImportError(
-                    "ccxt is required for Binance provider: pip install ccxt"
-                ) from e
-            self._exchange = ccxt.binance({
-                "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
-            })
-            self._log.info("Binance exchange initialized")
-        return self._exchange
+                exchange_class = getattr(ccxt, exchange_id, None)
+                if exchange_class is None:
+                    continue
+
+                exchange = exchange_class({
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "spot"},
+                })
+
+                # Probe connectivity by loading markets
+                exchange.load_markets()
+
+                self._exchange = exchange
+                self._exchange_id = exchange_id
+                self._log.info(
+                    f"{exchange_id.capitalize()} exchange initialized (active)",
+                )
+                return self._exchange
+
+            except Exception as exc:
+                last_error = exc
+                self._log.warning(
+                    f"{exchange_id} unavailable — trying next fallback",
+                    extra={"error": str(exc)[:120]},
+                )
+                # Clean up failed instance
+                try:
+                    exchange.close()
+                except Exception:
+                    pass
+
+        raise RuntimeError(
+            f"All exchanges failed. Last error: {last_error}"
+        )
 
     async def fetch_ohlcv(
         self,
@@ -220,7 +262,7 @@ class CcxtProvider:
         timeframe: str,
         limit: int,
     ) -> pd.DataFrame:
-        """Fetch OHLCV from Binance via ccxt."""
+        """Fetch OHLCV via ccxt (auto-selected exchange)."""
         exchange = self._ensure_exchange()
 
         # ccxt returns list of [timestamp_ms, o, h, l, c, v]
@@ -248,7 +290,7 @@ class CcxtProvider:
         symbol: str,
         timeframe: str,
     ) -> BarData:
-        """Fetch the latest (forming) bar from Binance."""
+        """Fetch the latest (forming) bar."""
         exchange = self._ensure_exchange()
 
         loop = asyncio.get_running_loop()
