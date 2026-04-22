@@ -267,10 +267,20 @@ class CcxtProvider:
 
         # ccxt returns list of [timestamp_ms, o, h, l, c, v]
         loop = asyncio.get_running_loop()
-        raw = await loop.run_in_executor(
-            None,
-            lambda: exchange.fetch_ohlcv(symbol, timeframe, limit=limit),
-        )
+        try:
+            raw = await loop.run_in_executor(
+                None,
+                lambda: exchange.fetch_ohlcv(symbol, timeframe, limit=limit),
+            )
+        except Exception as exc:
+            # Reset cached exchange so fallback chain re-runs on next call
+            self._log.warning(
+                f"{self._exchange_id} fetch failed — resetting for fallback",
+                extra={"error": str(exc)[:120]},
+            )
+            self._exchange = None
+            self._exchange_id = ""
+            raise
 
         if not raw:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
@@ -294,10 +304,20 @@ class CcxtProvider:
         exchange = self._ensure_exchange()
 
         loop = asyncio.get_running_loop()
-        raw = await loop.run_in_executor(
-            None,
-            lambda: exchange.fetch_ohlcv(symbol, timeframe, limit=2),
-        )
+        try:
+            raw = await loop.run_in_executor(
+                None,
+                lambda: exchange.fetch_ohlcv(symbol, timeframe, limit=2),
+            )
+        except Exception as exc:
+            # Reset cached exchange so fallback chain re-runs on next call
+            self._log.warning(
+                f"{self._exchange_id} fetch failed — resetting for fallback",
+                extra={"error": str(exc)[:120]},
+            )
+            self._exchange = None
+            self._exchange_id = ""
+            raise
 
         if not raw or len(raw) < 2:
             raise RuntimeError("Insufficient data from exchange")
