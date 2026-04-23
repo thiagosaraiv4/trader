@@ -55,8 +55,13 @@ def save_session(
         "trade_log": trade_log or [],
     }
     try:
-        with open(_SESSION_PATH, "w", encoding="utf-8") as f:
+        # Atomic write: write to temp file, then rename.
+        # Prevents corruption if process dies mid-write (Codespace shutdown).
+        tmp_path = _SESSION_PATH.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
+            f.flush()
+        tmp_path.replace(_SESSION_PATH)
         _log.info("Session saved", extra={"path": str(_SESSION_PATH)})
     except (OSError, TypeError) as e:
         _log.error(f"Failed to save session: {e}")

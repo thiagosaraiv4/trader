@@ -388,12 +388,12 @@ class HeadlessTradingBot:
         log.info("bot_stopped", extra={"component": "headless"})
 
     async def _periodic_save(self) -> None:
-        """Save session every 3600 seconds."""
+        """Save session every 300 seconds (5 min — minimize data loss on Codespace shutdown)."""
         while not self._shutdown_event.is_set():
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
-                    timeout=3600.0,
+                    timeout=300.0,
                 )
                 break  # shutdown requested
             except asyncio.TimeoutError:

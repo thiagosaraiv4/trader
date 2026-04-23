@@ -1,9 +1,11 @@
 # Session state (financial data — never commit)
 session.json
+session.tmp
 
 # Logs
 logs/
 bot.log
+*.pid
 
 # Python
 __pycache__/

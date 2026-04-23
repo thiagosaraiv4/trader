@@ -1,12 +1,21 @@
 {
-  "name": "Trading Bot – Headless",
+  "name": "Trading Bot – Headless 24/7",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt",
+
+  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt && chmod +x scripts/watchdog.sh",
+
+  "postStartCommand": "nohup bash scripts/watchdog.sh start > /dev/null 2>&1 &",
+
   "containerEnv": {
-    "TRADING_LOG_DIR": "/workspaces/pasta-gemini-trade/logs"
+    "TRADING_LOG_DIR": "/workspaces/pasta-gemini-trade/logs",
+    "PYTHONUNBUFFERED": "1"
   },
+
   "customizations": {
     "vscode": {
+      "settings": {
+        "codespaces.defaultIdleTimeout": 240
+      },
       "extensions": [
         "ms-python.python",
         "ms-python.pylint"
