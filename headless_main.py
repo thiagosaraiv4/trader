@@ -346,7 +346,7 @@ class HeadlessTradingBot:
             timeframe=self._cfg.default_timeframe,
             provider_id=ProviderID.BINANCE,
             snapshot_limit=200,
-            poll_interval_sec=2.0,
+            poll_interval_sec=5.0,
         )
 
         self._feed = DataFeedManager(

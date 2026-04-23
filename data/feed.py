@@ -469,6 +469,7 @@ class DataFeedManager:
                 retry_count = 0
 
                 # Phase 2: Poll loop
+                consecutive_errors = 0
                 while not self._stop_event.is_set():
                     try:
                         bar = await self._provider.fetch_latest_bar(
@@ -480,12 +481,38 @@ class DataFeedManager:
                             break
 
                         self._on_bar_update(bar)
+                        consecutive_errors = 0  # Reset on success
 
                     except Exception as poll_err:
+                        consecutive_errors += 1
+                        # Exponential backoff on errors: 2s, 4s, 8s... max 60s
+                        error_backoff = min(2.0 * (2 ** (consecutive_errors - 1)), 60.0)
                         self._log.warning(
-                            "Poll error (continuing)",
+                            "Poll error (retrying after backoff)",
+                            extra={
+                                "consecutive_errors": consecutive_errors,
+                                "backoff_sec": error_backoff,
+                            },
                             exc_info=poll_err,
                         )
+
+                        # If too many consecutive errors, break to reconnect
+                        if consecutive_errors >= 10:
+                            self._log.error(
+                                "Too many consecutive poll errors — reconnecting",
+                            )
+                            break
+
+                        # Wait the error backoff before retrying
+                        try:
+                            await asyncio.wait_for(
+                                self._stop_event.wait(),
+                                timeout=error_backoff,
+                            )
+                            break  # stop_event was set
+                        except asyncio.TimeoutError:
+                            pass  # Normal: backoff elapsed, retry
+                        continue  # Skip the normal poll interval
 
                     # Wait for next poll or stop signal
                     try:
