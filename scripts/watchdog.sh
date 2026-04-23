@@ -18,7 +18,8 @@
 
 set -euo pipefail
 
-WORKDIR="/workspaces/pasta-gemini-trade"
+# Auto-detect workspace root (works regardless of repo/folder name)
+WORKDIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="${WORKDIR}/logs"
 BOT_LOG="${LOG_DIR}/bot.log"
 WATCHDOG_LOG="${LOG_DIR}/watchdog.log"

@@ -7,7 +7,7 @@
   "postStartCommand": "nohup bash scripts/watchdog.sh start > /dev/null 2>&1 &",
 
   "containerEnv": {
-    "TRADING_LOG_DIR": "/workspaces/pasta-gemini-trade/logs",
+    "TRADING_LOG_DIR": "./logs",
     "PYTHONUNBUFFERED": "1"
   },
 
