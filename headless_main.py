@@ -80,7 +80,7 @@ def _configure_headless_logging() -> logging.Logger:
     root.setLevel(logging.DEBUG)
 
     handler = logging.StreamHandler(sys.stderr)
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(logging.INFO)
     handler.setFormatter(_HeadlessJsonFormatter())
     root.addHandler(handler)
 
