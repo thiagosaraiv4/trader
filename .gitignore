@@ -27,3 +27,6 @@ bot.pid
 backtest_log.txt
 backtest_log.zip
 backtest_output.log
+
+# Backtest data cache (run_backtest.py)
+backtest_cache/

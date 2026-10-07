@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import math
 import random
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -240,32 +242,34 @@ def _generate_synthetic_bars(
     return bars
 
 
-def _load_data_ccxt(
+def fetch_ohlcv_history(
     symbol: str,
     timeframe: str,
     start_date: datetime,
     end_date: datetime,
-    timeframe_minutes: int = 1,
-) -> tuple[list[BarData], str]:
+    exchange_id: str = "binance",
+    on_progress: Callable[[int], None] | None = None,
+) -> list[BarData]:
     """
-    Load historical OHLCV via ccxt (synchronous) with pagination.
+    Download CLOSED OHLCV bars in [start_date, end_date) via ccxt, paginating.
 
-    Falls back to synthetic data if ccxt/Binance is unavailable.
-    Returns (bars, source) where source is "ccxt/binance" or "synthetic".
-
-    Pagination: Binance allows max 1000 candles per request.
-    Rate limiting: ccxt handles this internally with enableRateLimit.
+    Raises on any failure (network, geo-block, unknown exchange) — the caller
+    decides whether a fallback is acceptable. The still-forming bar is never
+    included. Pages may be shorter than requested (exchange-specific limits);
+    pagination continues until end_date or no more data.
     """
+    import ccxt as ccxt_sync
+
+    exchange_cls = getattr(ccxt_sync, exchange_id, None)
+    if exchange_cls is None:
+        raise ValueError(f"Unknown ccxt exchange: {exchange_id!r}")
+
+    exchange = exchange_cls({"enableRateLimit": True, "options": {"defaultType": "spot"}})
     try:
-        import ccxt as ccxt_sync
-
-        exchange = ccxt_sync.binance({"enableRateLimit": True})
-
+        tf_ms = exchange.parse_timeframe(timeframe) * 1000
         since_ms = int(start_date.timestamp() * 1000)
-        until_ms = int(end_date.timestamp() * 1000)
-
-        all_ohlcv: list[list] = []
-        current_ms = since_ms
+        now_ms = int(time.time() * 1000)
+        until_ms = min(int(end_date.timestamp() * 1000), now_ms // tf_ms * tf_ms)
 
         log.info(
             "Loading historical data via ccxt",
@@ -274,69 +278,84 @@ def _load_data_ccxt(
                 "timeframe": timeframe,
                 "start": start_date.isoformat(),
                 "end": end_date.isoformat(),
+                "source": exchange_id,
             },
         )
 
+        rows: dict[int, list] = {}
+        current_ms = since_ms
         while current_ms < until_ms:
-            ohlcv = exchange.fetch_ohlcv(
-                symbol, timeframe, since=current_ms, limit=1000,
-            )
-            if not ohlcv:
+            page = exchange.fetch_ohlcv(symbol, timeframe, since=current_ms, limit=1000)
+            page = [r for r in page if since_ms <= r[0] < until_ms]
+            if not page:
                 break
+            for r in page:
+                rows[int(r[0])] = r
+            next_ms = max(int(r[0]) for r in page) + tf_ms
+            if next_ms <= current_ms:
+                break  # no progress — avoid looping forever
+            current_ms = next_ms
+            if on_progress is not None:
+                on_progress(len(rows))
+    finally:
+        try:
+            exchange.close()
+        except Exception:
+            pass
 
-            # Filter out bars beyond end_date
-            for row in ohlcv:
-                if row[0] <= until_ms:
-                    all_ohlcv.append(row)
-
-            # Advance to next page
-            current_ms = ohlcv[-1][0] + 1
-
-            if len(ohlcv) < 1000:
-                break  # No more data
-
-            log.debug(
-                "Fetched page",
-                extra={"bars": len(ohlcv), "total": len(all_ohlcv)},
-            )
-
-        exchange.close()
-
-        if not all_ohlcv:
-            log.warning("No data from ccxt — falling back to synthetic data")
-            return (
-                _generate_synthetic_bars(symbol, start_date, end_date, timeframe_minutes),
-                "synthetic",
-            )
-
-        # Convert to BarData
-        bars: list[BarData] = []
-        for row in all_ohlcv:
-            ts = datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc)
+    bars: list[BarData] = []
+    for ts_ms in sorted(rows):
+        r = rows[ts_ms]
+        try:
             bars.append(BarData(
-                timestamp=ts,
-                open=Decimal(str(row[1])),
-                high=Decimal(str(row[2])),
-                low=Decimal(str(row[3])),
-                close=Decimal(str(row[4])),
-                volume=Decimal(str(row[5])),
+                timestamp=datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc),
+                open=float(r[1]),
+                high=float(r[2]),
+                low=float(r[3]),
+                close=float(r[4]),
+                volume=float(r[5] or 0.0),
             ))
+        except (TypeError, ValueError):
+            continue  # malformed candle from the exchange
 
-        log.info(
-            "Historical data loaded",
-            extra={"bars": len(bars), "source": "ccxt/binance"},
-        )
-        return bars, "ccxt/binance"
+    log.info(
+        "Historical data loaded",
+        extra={"bars": len(bars), "source": f"ccxt/{exchange_id}"},
+    )
+    return bars
 
+
+def _load_data_ccxt(
+    symbol: str,
+    timeframe: str,
+    start_date: datetime,
+    end_date: datetime,
+    timeframe_minutes: int = 1,
+) -> tuple[list[BarData], str]:
+    """
+    Load historical OHLCV from Binance via ccxt.
+
+    Falls back to synthetic data if ccxt/Binance is unavailable.
+    Returns (bars, source) where source is "ccxt/binance" or "synthetic".
+    """
+    try:
+        bars = fetch_ohlcv_history(symbol, timeframe, start_date, end_date, "binance")
     except Exception as exc:
         log.warning(
             "ccxt fetch failed — using synthetic data",
             extra={"error": str(exc)},
         )
+        bars = []
+    else:
+        if not bars:
+            log.warning("No data from ccxt — falling back to synthetic data")
+
+    if not bars:
         return (
             _generate_synthetic_bars(symbol, start_date, end_date, timeframe_minutes),
             "synthetic",
         )
+    return bars, "ccxt/binance"
 
 
 # ---------------------------------------------------------------------------

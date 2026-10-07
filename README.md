@@ -85,6 +85,22 @@ sozinha (evita dois processos gravando o mesmo `session.json`).
 
 Para rodar em primeiro plano (debug), pare o watchdog antes e use `python headless_main.py`.
 
+### Backtest em dados recentes
+
+```bash
+python run_backtest.py                              # últimos 90 dias, candles de 1m, Binance
+python run_backtest.py --days 30
+python run_backtest.py --start 2026-07-01 --end 2026-10-01
+python run_backtest.py --timeframe 5m --exchange bybit
+```
+
+Roda a Strategy V3 com os mesmos parâmetros do robô ao vivo e mostra, além das métricas, o PnL bruto,
+as **taxas pagas**, o PnL líquido, o buy & hold do período e um resumo por mês. Os candles baixados
+ficam em `backtest_cache/`.
+
+Não usa dados sintéticos: se o download falhar, o script para. A Binance e a Bybit bloqueiam
+servidores nos EUA (caso do Codespaces) — **rode do seu computador** (do Brasil a Binance funciona).
+
 ### Rodar comparação Live vs Backtest
 
 ```bash
