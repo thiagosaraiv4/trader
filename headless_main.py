@@ -14,18 +14,20 @@ Architecture:
         → PaperTradingCore (pure execution)
 
 Signal handlers (SIGINT / SIGTERM) save session before exit.
-Periodic session save every 3600s via asyncio.create_task.
+Periodic session save every 300s via asyncio.create_task.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, TextIO
 
 import pandas as pd
 
@@ -64,7 +66,8 @@ class _HeadlessJsonFormatter(logging.Formatter):
             "balance", "pnl", "pnl_pct", "bars", "indicators",
             "trades", "win_rate", "profit_factor", "drawdown",
             "return_pct", "streak", "reason", "elapsed",
-            "from_state", "to_state", "error",
+            "from_state", "to_state", "error", "provider", "strategy",
+            "retry", "backoff_sec", "consecutive_errors", "position",
         ):
             val = getattr(record, key, None)
             if val is not None:
@@ -103,7 +106,7 @@ class HeadlessTradingBot:
         2. Initialize engines (IndicatorEngine, AlgoEngine, PaperTradingCore)
         3. Start DataFeedManager (Binance provider)
         4. Process bars: indicators → strategy → risk → execution
-        5. Periodic session save (3600s)
+        5. Periodic session save (300s)
         6. Graceful shutdown on SIGINT / SIGTERM
     """
 
@@ -114,6 +117,8 @@ class HeadlessTradingBot:
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._last_save_ts: float = time.monotonic()
         self._bar_count: int = 0
+        # Latest poll of the still-forming bar (see _on_bar)
+        self._forming_bar: BarData | None = None
 
         # -- Restore session -----------------------------------------------
         session = load_session(
@@ -261,13 +266,21 @@ class HeadlessTradingBot:
     # -- Data Feed Callbacks -----------------------------------------------
 
     def _on_snapshot(self, df: pd.DataFrame) -> None:
-        """Initialize indicators with historical snapshot. Called once."""
-        indicator_series = self._indicator_engine.initialize(df)
+        """Initialize indicators with historical snapshot (also on reconnect)."""
+        # Exchanges return the still-forming bar as the last row. Indicators
+        # must only see closed bars, exactly like the backtest.
+        closed_df = df
+        tf_sec = self._cfg.default_timeframe.to_seconds()
+        if not df.empty and df.index[-1].timestamp() + tf_sec > time.time():
+            closed_df = df.iloc[:-1]
+        self._forming_bar = None
+
+        indicator_series = self._indicator_engine.initialize(closed_df)
         log.info(
             "snapshot_loaded",
             extra={
                 "component": "headless",
-                "bars": len(df),
+                "bars": len(closed_df),
                 "indicators": list(indicator_series.keys()),
             },
         )
@@ -278,21 +291,33 @@ class HeadlessTradingBot:
 
     def _on_bar(self, bar: BarData) -> None:
         """
-        Process a single bar tick. All O(1) operations:
+        Called on every poll with the still-forming bar.
+
+        - Mark price (PnL, hard/trailing stop) is updated on every poll.
+        - Indicators + strategy run once per CLOSED bar, as in the backtest.
+          A bar counts as closed when the next one starts; its final values
+          are those of the last poll (at most one poll interval old).
+        """
+        self._core.update_mark_price(bar)
+
+        prev = self._forming_bar
+        self._forming_bar = bar
+        if prev is not None and bar.timestamp > prev.timestamp:
+            self._on_bar_closed(prev)
+
+    def _on_bar_closed(self, bar: BarData) -> None:
+        """
+        Process a closed bar. All O(1) operations:
             1. IndicatorEngine.update(bar)
-            2. PaperTradingCore.update_mark_price(bar)
-            3. AlgoEngine.evaluate(...)
-            4. PaperTradingCore.execute_order(order)
+            2. AlgoEngine.evaluate(...)
+            3. PaperTradingCore.execute_order(order) — fills at the live price
         """
         self._bar_count += 1
 
         # Step 1: Update indicators — O(1) per indicator
         indicators = self._indicator_engine.update(bar)
 
-        # Step 2: Update mark price (trailing stop, PnL)
-        self._core.update_mark_price(bar)
-
-        # Step 3: Strategy → RiskManager evaluation
+        # Step 2: Strategy → RiskManager evaluation
         order = self._algo_engine.evaluate(
             price=float(bar.close),
             indicators=indicators,
@@ -301,7 +326,7 @@ class HeadlessTradingBot:
             timestamp=bar.timestamp.timestamp(),
         )
 
-        # Step 4: Execute order if approved
+        # Step 3: Execute order if approved
         if order is not None:
             self._core.execute_order(order)
 
@@ -312,6 +337,7 @@ class HeadlessTradingBot:
                 "component": "headless",
                 "from_state": change.previous.name,
                 "to_state": change.current.name,
+                "reason": change.reason,
             },
         )
 
@@ -345,7 +371,7 @@ class HeadlessTradingBot:
             symbol=self._cfg.default_symbol,
             timeframe=self._cfg.default_timeframe,
             provider_id=ProviderID.BINANCE,
-            snapshot_limit=200,
+            snapshot_limit=201,  # 200 closed bars (SMA_200) + the forming one
             poll_interval_sec=5.0,
         )
 
@@ -397,8 +423,22 @@ class HeadlessTradingBot:
                 )
                 break  # shutdown requested
             except asyncio.TimeoutError:
+                self._emit_heartbeat()
                 self.save()
                 self._emit_performance_log()
+
+    def _emit_heartbeat(self) -> None:
+        """Periodic proof of life: last price and closed bars processed."""
+        log.info(
+            "heartbeat",
+            extra={
+                "component": "headless",
+                "price": round(self._core._last_price, 2),
+                "bars": self._bar_count,
+                "position": self._core.position.side,
+                "balance": round(self._core.balance, 2),
+            },
+        )
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown (called from signal handler)."""
@@ -429,8 +469,38 @@ async def run() -> None:
     await bot.run()
 
 
+def _acquire_instance_lock() -> TextIO | None:
+    """
+    Hold an exclusive lock for the whole process lifetime so two bots never
+    write the same session.json (e.g. watchdog + a manual `python headless_main.py`).
+
+    Returns the open lock file (keep a reference), or None if another
+    instance already holds it. Unix only; a no-op elsewhere.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return open(os.devnull, "w")
+
+    lock_file = open(Path(__file__).resolve().parent / "session.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return None
+    return lock_file
+
+
 def main() -> None:
     """Synchronous entry point."""
+    lock = _acquire_instance_lock()
+    if lock is None:
+        log.error(
+            "another_instance_running — exiting",
+            extra={"component": "headless", "reason": "session.lock is held"},
+        )
+        sys.exit(0)
+
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

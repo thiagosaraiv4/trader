@@ -1,21 +1,17 @@
 {
-  "name": "Trading Bot – Headless 24/7",
+  "name": "Trading Bot – Headless",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
 
   "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt && chmod +x scripts/watchdog.sh",
 
-  "postStartCommand": "nohup bash scripts/watchdog.sh start > /dev/null 2>&1 &",
+  "postStartCommand": "setsid nohup bash scripts/watchdog.sh start > /dev/null 2>&1 &",
 
   "containerEnv": {
-    "TRADING_LOG_DIR": "./logs",
     "PYTHONUNBUFFERED": "1"
   },
 
   "customizations": {
     "vscode": {
-      "settings": {
-        "codespaces.defaultIdleTimeout": 240
-      },
       "extensions": [
         "ms-python.python",
         "ms-python.pylint"

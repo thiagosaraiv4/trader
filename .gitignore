@@ -1,6 +1,7 @@
 # Session state (financial data — never commit)
 session.json
 session.tmp
+session.lock
 
 # Logs
 logs/

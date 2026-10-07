@@ -10,15 +10,12 @@ Runs the Trend Filtered MA Cross Strategy (EMA9/SMA20 + SMA200 filter) against h
 and prints performance metrics. Uses ccxt/Binance for real data,
 falls back to synthetic data if unavailable.
 
-Requires a QCoreApplication for PaperTradingEngine (QObject subclass).
-This is lightweight — no GUI is created.
+No Qt required — runs in headless environments (Codespaces).
 """
 from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
-
-from PySide6.QtCore import QCoreApplication
 
 from core.backtest_engine import BacktestEngine
 from utils.logger import configure_logging, get_logger
@@ -29,9 +26,6 @@ def main() -> None:
     import logging
     configure_logging(level=logging.INFO)
     log = get_logger(__name__, component="run_backtest")
-
-    # QCoreApplication needed for PaperTradingEngine (QObject)
-    QCoreApplication.instance() or QCoreApplication(sys.argv)
 
     log.info("=" * 60)
     log.info("BACKTESTING ENGINE — V3 OUT OF SAMPLE VALIDATION (2022/2023)")

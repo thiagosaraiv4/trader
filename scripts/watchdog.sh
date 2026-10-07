@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # =============================================================================
-# watchdog.sh — Bot Watchdog + Keep-Alive for GitHub Codespaces
+# watchdog.sh — Bot supervisor for GitHub Codespaces
 # =============================================================================
 #
 # Features:
 #   1. Auto-restarts the bot if it crashes
-#   2. Sends periodic keep-alive pings to prevent Codespace idle timeout
-#   3. Logs all events to /workspaces/pasta-gemini-trade/logs/watchdog.log
-#   4. Saves PID for external monitoring
+#   2. Graceful stop (SIGTERM → bot saves session.json before exiting)
+#   3. Logs all events to <repo>/logs/watchdog.log
+#   4. Saves PIDs for external monitoring
+#
+# NOTE: this does NOT keep the Codespace awake. Codespaces stop after the idle
+# timeout (max 240 min, set at github.com/settings/codespaces) when nobody is
+# interacting with them. The bot resumes from session.json on the next start.
 #
 # Usage:
-#   ./scripts/watchdog.sh start   — Start bot + watchdog (background)
+#   ./scripts/watchdog.sh start   — Start bot + watchdog (foreground; use nohup/setsid for background)
 #   ./scripts/watchdog.sh stop    — Graceful shutdown
 #   ./scripts/watchdog.sh status  — Check if running
 #   ./scripts/watchdog.sh logs    — Tail bot logs
@@ -26,12 +30,15 @@ WATCHDOG_LOG="${LOG_DIR}/watchdog.log"
 PID_FILE="${LOG_DIR}/watchdog.pid"
 BOT_PID_FILE="${LOG_DIR}/bot.pid"
 
-# Keep-alive interval (seconds) — ping every 10 minutes to prevent idle timeout
-KEEPALIVE_INTERVAL=600
-# Max restart attempts before giving up
+# Max consecutive restart attempts before giving up
 MAX_RESTARTS=50
+# A bot that ran at least this long (seconds) resets the restart counter
+STABLE_RUN_SEC=600
 # Delay between restarts (seconds)
 RESTART_DELAY=10
+
+BOT_PID=""
+STOPPING=0
 
 mkdir -p "${LOG_DIR}"
 
@@ -40,69 +47,81 @@ log_msg() {
     echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $1"
 }
 
+# True if $1 is a live PID whose command line contains $2.
+# PID files survive Codespace restarts, so a bare `kill -0` could match an
+# unrelated process that reused the PID.
+pid_matches() {
+    local pid="$1" pattern="$2"
+    [ -n "${pid}" ] || return 1
+    kill -0 "${pid}" 2>/dev/null || return 1
+    tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q -- "${pattern}"
+}
+
+read_pid() {
+    cat "$1" 2>/dev/null || true
+}
+
+# Runs in the watchdog shell itself (no command substitution), so the bot is
+# a child of this shell and `wait` works on it.
 start_bot() {
     cd "${WORKDIR}"
     python -u headless_main.py >> "${BOT_LOG}" 2>&1 &
-    local pid=$!
-    echo "${pid}" > "${BOT_PID_FILE}"
-    log_msg "BOT_STARTED pid=${pid}"
-    echo "${pid}"
+    BOT_PID=$!
+    echo "${BOT_PID}" > "${BOT_PID_FILE}"
+    log_msg "BOT_STARTED pid=${BOT_PID}"
 }
 
-keepalive_loop() {
-    # Sends minimal activity to prevent Codespace idle detection
-    while true; do
-        sleep "${KEEPALIVE_INTERVAL}"
-        # Touch a file and do a minimal git operation to register activity
-        touch "${LOG_DIR}/.keepalive"
-        log_msg "KEEPALIVE_PING"
-    done
+on_stop_signal() {
+    STOPPING=1
+    log_msg "WATCHDOG_STOP_SIGNAL — forwarding SIGTERM to bot"
+    if [ -n "${BOT_PID}" ]; then
+        kill -TERM "${BOT_PID}" 2>/dev/null || true
+    fi
 }
 
 do_start() {
-    # Check if already running
-    if [ -f "${PID_FILE}" ]; then
-        local old_pid
-        old_pid=$(cat "${PID_FILE}")
-        if kill -0 "${old_pid}" 2>/dev/null; then
-            echo "Watchdog already running (pid=${old_pid}). Use 'stop' first."
-            exit 1
-        fi
+    if pid_matches "$(read_pid "${PID_FILE}")" "watchdog.sh"; then
+        echo "Watchdog already running (pid=$(read_pid "${PID_FILE}")). Use 'stop' first."
+        exit 1
     fi
 
     log_msg "========================================="
-    log_msg "WATCHDOG_STARTING"
+    log_msg "WATCHDOG_STARTING pid=$$"
     log_msg "========================================="
 
-    # Save watchdog PID (the subshell below)
     echo $$ > "${PID_FILE}"
+    trap on_stop_signal TERM INT
 
-    # Start keep-alive in background
-    keepalive_loop &
-    local keepalive_pid=$!
-    log_msg "KEEPALIVE_STARTED pid=${keepalive_pid}"
-
-    # Main watchdog loop — restart bot on crash
     local restart_count=0
+    local exit_code started_at ran_for
 
-    while [ "${restart_count}" -lt "${MAX_RESTARTS}" ]; do
-        local bot_pid
-        bot_pid=$(start_bot)
+    while [ "${STOPPING}" -eq 0 ] && [ "${restart_count}" -lt "${MAX_RESTARTS}" ]; do
+        start_bot
+        started_at=$(date +%s)
 
-        # Wait for bot to exit
+        # `wait` returns early when a trapped signal arrives; keep waiting
+        # until the bot itself has exited so it can finish saving the session.
         set +e
-        wait "${bot_pid}"
-        local exit_code=$?
+        wait "${BOT_PID}"
+        exit_code=$?
+        while kill -0 "${BOT_PID}" 2>/dev/null; do
+            wait "${BOT_PID}"
+            exit_code=$?
+        done
         set -e
 
-        log_msg "BOT_EXITED code=${exit_code} restarts=${restart_count}"
+        ran_for=$(( $(date +%s) - started_at ))
+        log_msg "BOT_EXITED code=${exit_code} ran_for=${ran_for}s restarts=${restart_count}"
 
-        # If clean exit (0 or SIGTERM=143), don't restart
-        if [ "${exit_code}" -eq 0 ] || [ "${exit_code}" -eq 143 ]; then
+        # Stop requested, or clean exit (0 or SIGTERM=143): don't restart
+        if [ "${STOPPING}" -eq 1 ] || [ "${exit_code}" -eq 0 ] || [ "${exit_code}" -eq 143 ]; then
             log_msg "CLEAN_EXIT — not restarting"
             break
         fi
 
+        if [ "${ran_for}" -ge "${STABLE_RUN_SEC}" ]; then
+            restart_count=0
+        fi
         restart_count=$((restart_count + 1))
         log_msg "RESTARTING in ${RESTART_DELAY}s (attempt ${restart_count}/${MAX_RESTARTS})"
         sleep "${RESTART_DELAY}"
@@ -112,52 +131,44 @@ do_start() {
         log_msg "MAX_RESTARTS_REACHED — giving up"
     fi
 
-    # Cleanup
-    kill "${keepalive_pid}" 2>/dev/null || true
     rm -f "${PID_FILE}" "${BOT_PID_FILE}"
     log_msg "WATCHDOG_STOPPED"
 }
 
 do_stop() {
-    if [ ! -f "${BOT_PID_FILE}" ]; then
-        echo "No bot PID file found."
-        exit 1
+    local wd_pid bot_pid
+    wd_pid=$(read_pid "${PID_FILE}")
+    bot_pid=$(read_pid "${BOT_PID_FILE}")
+
+    log_msg "STOP_REQUESTED watchdog_pid=${wd_pid:-none} bot_pid=${bot_pid:-none}"
+
+    # Stop the watchdog first so it won't restart the bot; it forwards SIGTERM.
+    if pid_matches "${wd_pid}" "watchdog.sh"; then
+        kill -TERM "${wd_pid}" 2>/dev/null || true
     fi
 
-    local bot_pid
-    bot_pid=$(cat "${BOT_PID_FILE}")
-
-    log_msg "STOP_REQUESTED bot_pid=${bot_pid}"
-
-    # Send SIGTERM for graceful shutdown (saves session)
-    if kill -TERM "${bot_pid}" 2>/dev/null; then
+    if pid_matches "${bot_pid}" "headless_main.py"; then
+        kill -TERM "${bot_pid}" 2>/dev/null || true
         echo "Sent SIGTERM to bot (pid=${bot_pid}). Waiting for graceful shutdown..."
-        # Wait up to 30 seconds
-        for i in $(seq 1 30); do
-            if ! kill -0 "${bot_pid}" 2>/dev/null; then
-                echo "Bot stopped gracefully."
-                break
-            fi
+        for _ in $(seq 1 30); do
+            pid_matches "${bot_pid}" "headless_main.py" || break
             sleep 1
         done
-
-        # Force kill if still running
-        if kill -0 "${bot_pid}" 2>/dev/null; then
+        if pid_matches "${bot_pid}" "headless_main.py"; then
             echo "Force killing bot..."
             kill -9 "${bot_pid}" 2>/dev/null || true
+        else
+            echo "Bot stopped gracefully."
         fi
     else
-        echo "Bot process not found (pid=${bot_pid})"
+        echo "Bot process not running."
     fi
 
-    # Kill watchdog
-    if [ -f "${PID_FILE}" ]; then
-        local wd_pid
-        wd_pid=$(cat "${PID_FILE}")
-        kill -TERM "${wd_pid}" 2>/dev/null || true
-        # Kill all children (keepalive loop)
-        pkill -P "${wd_pid}" 2>/dev/null || true
-    fi
+    # Give the watchdog a moment to log and clean up after the bot exits
+    for _ in $(seq 1 5); do
+        pid_matches "${wd_pid}" "watchdog.sh" || break
+        sleep 1
+    done
 
     rm -f "${PID_FILE}" "${BOT_PID_FILE}"
     log_msg "ALL_STOPPED"
@@ -167,26 +178,18 @@ do_stop() {
 do_status() {
     echo "=== Trading Bot Status ==="
 
-    if [ -f "${BOT_PID_FILE}" ]; then
-        local bot_pid
-        bot_pid=$(cat "${BOT_PID_FILE}")
-        if kill -0 "${bot_pid}" 2>/dev/null; then
-            echo "✅ Bot:      RUNNING (pid=${bot_pid})"
-        else
-            echo "❌ Bot:      DEAD (stale pid=${bot_pid})"
-        fi
+    local bot_pid wd_pid
+    bot_pid=$(read_pid "${BOT_PID_FILE}")
+    wd_pid=$(read_pid "${PID_FILE}")
+
+    if pid_matches "${bot_pid}" "headless_main.py"; then
+        echo "✅ Bot:      RUNNING (pid=${bot_pid})"
     else
         echo "❌ Bot:      NOT RUNNING"
     fi
 
-    if [ -f "${PID_FILE}" ]; then
-        local wd_pid
-        wd_pid=$(cat "${PID_FILE}")
-        if kill -0 "${wd_pid}" 2>/dev/null; then
-            echo "✅ Watchdog: RUNNING (pid=${wd_pid})"
-        else
-            echo "❌ Watchdog: DEAD (stale pid=${wd_pid})"
-        fi
+    if pid_matches "${wd_pid}" "watchdog.sh"; then
+        echo "✅ Watchdog: RUNNING (pid=${wd_pid})"
     else
         echo "❌ Watchdog: NOT RUNNING"
     fi

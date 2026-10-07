@@ -7,7 +7,7 @@ Principle: ZERO duplicated logic.
     Reuses the exact same production components:
     - IndicatorEngine (SMA, EMA with O(1) incremental updates)
     - AlgoEngine (Strategy → RiskManager → Order)
-    - PaperTradingEngine (execution, position tracking, PnL)
+    - PaperTradingCore (execution, position tracking, PnL)
 
 The BacktestEngine only simulates the flow of market data.
 
@@ -48,7 +48,7 @@ import pandas as pd
 
 from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
 from core.indicators import EMAIndicator, IndicatorEngine, SMAIndicator, ATRIndicator
-from core.paper_trading import PaperTradingEngine
+from core.paper_trading import PaperTradingCore
 from core.types import BarData
 from utils.logger import get_logger
 
@@ -342,7 +342,7 @@ class BacktestEngine:
     Reuses EXACTLY:
         - IndicatorEngine (incremental O(1) updates)
         - AlgoEngine (strategy + risk manager)
-        - PaperTradingEngine (execution + position tracking)
+        - PaperTradingCore (execution + position tracking)
 
     The engine only controls the flow of bars — it does not contain
     any trading logic. All decisions are made by the same code path
@@ -475,7 +475,7 @@ class BacktestEngine:
         indicator_engine.register(EMAIndicator(period=9))
 
         # Same paper trading engine as production
-        paper_engine = PaperTradingEngine(initial_balance=self._initial_balance)
+        paper_engine = PaperTradingCore(initial_balance=self._initial_balance)
 
         # --- Warmup: initialize indicators with first N bars ---
         warmup_bars = bars[:self._WARMUP_BARS]
@@ -517,7 +517,7 @@ class BacktestEngine:
             )
 
             algo_closed = False
-            # Step 3: Execute order (if any) — same PaperTradingEngine
+            # Step 3: Execute order (if any) — same PaperTradingCore
             if order is not None:
                 paper_engine.execute_order(order)
                 if order.side == "SELL" and prev_side != "FLAT":

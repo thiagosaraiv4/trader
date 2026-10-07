@@ -14,7 +14,6 @@ import json
 from enum import Enum
 from core.config import AppConfig
 from core.backtest_engine import BacktestEngine
-from core.algo_trading import TrendFilteredMACrossStrategyV3
 from core.session import SessionState, load_session
 
 def _compute_live_metrics(trade_log: list[dict], initial_balance: float) -> dict:
@@ -87,28 +86,26 @@ async def compare_live_with_backtest():
 
     print("\n[*] Re-rodando Motor Historico no mesmo Gêmeo Digital...")
     
-    # Run Backtest identically
-    strategy = TrendFilteredMACrossStrategyV3(symbol=str(cfg.default_symbol))
+    # Run Backtest identically (BacktestEngine always runs Strategy V3)
     engine = BacktestEngine(
         symbol=str(cfg.default_symbol),
         timeframe=cfg.default_timeframe.value,
-        strategies=[strategy],
         initial_balance=10_000.0,
-        start_date=start_dt.isoformat(),
-        end_date=end_dt.isoformat()
+        start_date=start_dt,
+        end_date=end_dt,
+        use_ccxt=True,
     )
-    
-    results = await engine.run_backtest()
-    if not results:
-        print("[!] Backtest falhou em gerar relatórios.")
+
+    bt_res = engine.run()
+    if bt_res.total_trades == 0 and not bt_res.equity_curve:
+        print("[!] Backtest falhou em gerar relatórios (dados insuficientes?).")
         return
-        
-    bt_res = results[0]  # First strategy result
+
     bt_metrics = {
         "total_trades": bt_res.total_trades,
-        "win_rate": bt_res.win_rate * 100,       # backtest return win rate as float (0.0 to 1.0)
+        "win_rate": bt_res.win_rate * 100,               # ratio 0..1
         "profit_factor": bt_res.profit_factor,
-        "return_pct": bt_res.total_return * 100, # Assuming backtest format is ratio or pre-pct
+        "return_pct": bt_res.total_return_pct * 100,     # ratio
     }
 
     print("\n============================================================")

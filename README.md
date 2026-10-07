@@ -68,26 +68,22 @@ Requer: `numpy`, `pandas`, `ccxt` (sem Qt)
 pip install -r requirements.txt
 ```
 
-### Iniciar em background
+### Iniciar / parar / status (watchdog)
+
+O `scripts/watchdog.sh` sobe o bot, reinicia em caso de crash e faz o shutdown graceful
+(o bot salva `session.json` ao receber SIGTERM).
 
 ```bash
-nohup python headless_main.py > bot.log 2>&1 &
-echo $! > bot.pid
+setsid nohup bash scripts/watchdog.sh start > /dev/null 2>&1 &   # iniciar em background
+bash scripts/watchdog.sh status                                 # bot + watchdog rodando?
+bash scripts/watchdog.sh logs                                   # tail -f logs/bot.log
+bash scripts/watchdog.sh stop                                   # encerrar gracefully
 ```
 
-### Monitorar
+Só pode existir **um** bot por pasta: uma segunda instância encontra `session.lock` ocupado e sai
+sozinha (evita dois processos gravando o mesmo `session.json`).
 
-```bash
-tail -f bot.log | python -m json.tool
-```
-
-### Encerrar gracefully
-
-```bash
-kill -SIGTERM $(cat bot.pid)
-```
-
-O bot salva `session.json` automaticamente antes de encerrar.
+Para rodar em primeiro plano (debug), pare o watchdog antes e use `python headless_main.py`.
 
 ### Rodar comparação Live vs Backtest
 
@@ -95,49 +91,70 @@ O bot salva `session.json` automaticamente antes de encerrar.
 python run_comparison.py
 ```
 
+O backtest baixa histórico da Binance; de servidores nos EUA (caso comum no Codespaces) a Binance
+bloqueia o acesso e o backtest cai para **dados sintéticos** (aparece o aviso
+`ccxt fetch failed — using synthetic data`). Nesse caso o resultado da comparação não vale.
+
 ---
 
 ## Monitoramento Diário
 
+Logs em `logs/bot.log` (uma linha JSON por evento) e `logs/watchdog.log`.
+
 ### 1. Verificar se o bot está rodando
 
 ```bash
-ps aux | grep headless_main
+bash scripts/watchdog.sh status
 ```
 
 ### 2. Últimas 20 linhas do log
 
 ```bash
-tail -20 bot.log | python -m json.tool
+tail -20 logs/bot.log | python -m json.tool --json-lines
 ```
 
-### 3. Verificar trades do dia
+### 3. Prova de vida (a cada 5 min: preço atual, candles processados, posição)
 
 ```bash
-grep '"trade_close"' bot.log | tail -5
+grep '"heartbeat"' logs/bot.log | tail -1 | python -m json.tool
 ```
 
-### 4. Verificar performance acumulada
+### 4. Verificar trades do dia
 
 ```bash
-grep '"performance_snapshot"' bot.log | tail -1 | python -m json.tool
+grep '"trade_close"' logs/bot.log | tail -5
+```
+
+### 5. Verificar performance acumulada
+
+```bash
+grep '"performance_snapshot"' logs/bot.log | tail -1 | python -m json.tool
 ```
 
 ---
 
 ## GitHub Codespaces
 
-O repositório inclui `.devcontainer/devcontainer.json` pré-configurado:
+O repositório inclui `.devcontainer/devcontainer.json`:
 
 - **Imagem**: Python 3.11
-- **Dependências**: Instaladas automaticamente via `requirements.txt`
-- **Variável**: `TRADING_LOG_DIR=/workspaces/pasta-gemini-trade/logs`
+- **Dependências**: instaladas automaticamente via `requirements.txt`
+- **Auto-start**: o watchdog (e o bot) sobem sozinhos toda vez que o Codespace inicia —
+  não é preciso rodar nada. Confira com `bash scripts/watchdog.sh status`.
 
-Ao abrir no Codespaces, o ambiente está pronto para executar:
+### Limites do Codespaces (importante)
 
-```bash
-python headless_main.py
-```
+O Codespaces **não roda 24/7**:
+
+- **Idle timeout**: o Codespace para depois de um tempo sem interação (padrão 30 min, máximo
+  240 min). Configure em <https://github.com/settings/codespaces> → *Default idle timeout*.
+  Processos em background não contam como atividade.
+- **Cota gratuita**: 120 core-horas/mês na conta pessoal Free (≈ 60 h numa máquina de 2 cores).
+- **Região**: de servidores nos EUA a Binance e a Bybit bloqueiam o acesso; o bot cai
+  automaticamente para a Kraken (`Kraken exchange initialized (active)` no log).
+
+Quando o Codespace para, o estado fica salvo em `session.json` (a cada 5 min e no shutdown) e o
+bot retoma ao reabrir. Para rodar 24/7 de verdade, use uma VPS/VM e o mesmo `watchdog.sh`.
 
 ---
 
@@ -152,7 +169,7 @@ O arquivo `session.json` armazena o estado financeiro da sessão:
 **⚠️ `session.json` está no `.gitignore` — nunca é commitado.**
 
 Salvamento automático:
-- A cada 3600 segundos (1 hora)
+- A cada 300 segundos (5 min)
 - No shutdown graceful (SIGTERM/SIGINT)
 
 ---

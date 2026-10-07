@@ -142,6 +142,19 @@ def configure_logging(
 # Logger factory
 # ---------------------------------------------------------------------------
 
+class _ContextAdapter(logging.LoggerAdapter):
+    """
+    LoggerAdapter that merges per-call extra={...} with the bound context.
+
+    The stdlib adapter replaces per-call extras with the bound context,
+    silently dropping fields such as the exchange error message.
+    """
+
+    def process(self, msg: Any, kwargs: Any) -> tuple[Any, Any]:
+        kwargs["extra"] = {**self.extra, **(kwargs.get("extra") or {})}
+        return msg, kwargs
+
+
 def get_logger(name: str, **context: Any) -> logging.LoggerAdapter:
     """
     Return a LoggerAdapter with bound context fields.
@@ -151,4 +164,4 @@ def get_logger(name: str, **context: Any) -> logging.LoggerAdapter:
         log.info("Connected")  # → "[feed] Connected | symbol=BTCUSDT"
     """
     logger = logging.getLogger(name)
-    return logging.LoggerAdapter(logger, extra=context)
+    return _ContextAdapter(logger, extra=context)
