@@ -72,6 +72,23 @@ class TradeLog:
     side: str
     exit_reason: str = "unknown"
     position_usd: float = 0.0
+    balance_after: float = 0.0  # cash after the closing fill (net of fees)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaySegment:
+    """
+    One stretch of live operation between two snapshots of the live bot.
+
+    warmup:  bars only used to (re)initialize indicators — the bot did not
+             trade them (e.g. bars from while it was offline).
+    bars:    bars the bot processed live, in order.
+    new_run: True when the bot process restarted (fresh strategy and
+             AlgoEngine state); False for a feed reconnect in the same run.
+    """
+    warmup: list[BarData]
+    bars: list[BarData]
+    new_run: bool = True
 
 
 @dataclass(slots=True)
@@ -388,13 +405,16 @@ class BacktestEngine:
         use_ccxt: bool = True,
         bars: list[BarData] | None = None,
         warmup_bars: int | None = None,
+        segments: list[ReplaySegment] | None = None,
     ) -> None:
         """
         Args:
-            bars: Pre-loaded bars (e.g. recorded by the live bot). When given,
-                no data is downloaded and start_date/end_date are ignored.
+            bars: Pre-loaded bars. When given, no data is downloaded and
+                start_date/end_date are ignored.
             warmup_bars: Bars used only to initialize indicators
                 (default _WARMUP_BARS). The simulation starts after them.
+            segments: Replay of a live run recorded by the bot
+                (core/bar_log.load_segments). Takes precedence over bars.
         """
         self._symbol = symbol
         self._timeframe = timeframe
@@ -406,6 +426,7 @@ class BacktestEngine:
         self._risk_pct = risk_pct
         self._use_ccxt = use_ccxt
         self._preloaded_bars = bars
+        self._segments = segments
         self._warmup_bars = warmup_bars if warmup_bars is not None else self._WARMUP_BARS
 
     def run(self) -> BacktestResult:
@@ -435,6 +456,19 @@ class BacktestEngine:
         # 1. Load data. Warm-up bars are fetched BEFORE start_date so the
         #    simulated (traded) period is exactly [start_date, end_date].
         tf_minutes = self._timeframe_to_minutes()
+        if self._segments is not None:
+            segments = [seg for seg in self._segments if seg.warmup and seg.bars]
+            if not segments:
+                log.error("No replayable segments (need warm-up and live bars)")
+                return BacktestResult(
+                    initial_balance=self._initial_balance,
+                    data_source="live_replay",
+                )
+            result = self._simulate_segments(segments)
+            result.data_source = "live_replay"
+            self._log_results(result)
+            return result
+
         if self._preloaded_bars is not None:
             bars = list(self._preloaded_bars)
             data_source = "preloaded"
@@ -482,30 +516,27 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     def _simulate(self, bars: list[BarData]) -> BacktestResult:
+        """Classic backtest: one warm-up block followed by the simulated bars."""
+        return self._simulate_segments([ReplaySegment(
+            warmup=bars[:self._warmup_bars],
+            bars=bars[self._warmup_bars:],
+            new_run=True,
+        )])
+
+    def _simulate_segments(self, segments: list[ReplaySegment]) -> BacktestResult:
         """
         Core simulation loop. Pure synchronous execution.
 
         No pandas inside this loop. No sleep(). No asyncio.
         All trading decisions are made by the same production components.
-        """
-        # --- Setup production components ---
 
+        Each segment mirrors a live (re)start: indicators are re-initialized
+        from its warm-up bars (never traded), and on a new run the strategy
+        and AlgoEngine are rebuilt like a fresh process. Balance and the open
+        position carry over, as they do through session.json.
+        """
         # Simulated clock for strategy cooldown (uses bar timestamps)
         sim_clock = _SimulatedClock()
-
-        # Strategy V3: logic string mode, declarative
-        strategy = TrendFilteredMACrossStrategyV3(
-            symbol=self._symbol,
-        )
-
-        # Same algo engine as production, now managing cooldown
-        algo_engine = AlgoEngine(
-            risk_pct=self._risk_pct,
-            cooldown_sec=self._cooldown_sec,
-            initial_session_balance=self._initial_balance,
-        )
-        algo_engine.set_strategy(strategy)
-        algo_engine.enable()
 
         # Same indicator engine as production
         indicator_engine = IndicatorEngine()
@@ -516,16 +547,7 @@ class BacktestEngine:
 
         # Same paper trading engine as production
         paper_engine = PaperTradingCore(initial_balance=self._initial_balance)
-
-        # --- Warmup: initialize indicators with first N bars ---
-        warmup_bars = bars[:self._warmup_bars]
-        sim_bars = bars[self._warmup_bars:]
-
-        warmup_df = _bars_to_dataframe(warmup_bars)
-        indicator_engine.initialize(warmup_df)
-
-        # Set initial price reference in paper engine
-        paper_engine._last_price = float(warmup_bars[-1].close)
+        algo_engine: AlgoEngine | None = None
 
         # --- Simulation state ---
         trade_log: list[TradeLog] = []
@@ -533,7 +555,6 @@ class BacktestEngine:
         current_entry: dict | None = None
         peak_equity: float = self._initial_balance
         max_drawdown: float = 0.0
-        pending_order: OrderRequest | None = None
 
         def track_position_change(
             prev_side: str,
@@ -570,31 +591,12 @@ class BacktestEngine:
                     side=current_entry["side"],
                     exit_reason=exit_reason,
                     position_usd=current_entry["position_usd"],
+                    balance_after=paper_engine.balance,
                 ))
                 current_entry = None
 
-        # --- Main loop (NO pandas, NO sleep, NO asyncio) ---
-        # Same order of events as the live bot (headless_main.py):
-        #   a signal is computed when bar t closes and fills at the next
-        #   available price (open of bar t+1) — never at a price from before
-        #   the signal existed.
-        for bar in sim_bars:
-            # Advance simulated clock to bar timestamp
-            sim_clock.set(bar.timestamp.timestamp())
-
-            # Step 1: Fill the order signalled at the previous close, at this open
-            if pending_order is not None:
-                prev_side = paper_engine.position.side
-                prev_realized = paper_engine.position.realized_pnl
-                paper_engine._last_price = float(bar.open)
-                paper_engine.execute_order(pending_order)
-                track_position_change(
-                    prev_side, prev_realized, False, bar,
-                    algo_closed=pending_order.side == "SELL",
-                )
-                pending_order = None
-
-            # Step 2: Mark price at close → PnL, trailing activation, stops
+        def mark(bar: BarData) -> None:
+            """Mark price → PnL, trailing activation, hard/trailing stops."""
             prev_side = paper_engine.position.side
             prev_realized = paper_engine.position.realized_pnl
             was_trailing_active = paper_engine.position.trailing_active
@@ -604,37 +606,125 @@ class BacktestEngine:
                 algo_closed=False,
             )
 
-            # Step 3: Indicators + strategy on the closed bar → order for next open
+        def close_bar(bar: BarData, fill_price: float, fill_bar: BarData, allow_entry: bool = True) -> None:
+            """
+            Bar t has closed: indicators + strategy on it, and the order (if any)
+            fills right away at fill_price — the open of bar t+1, like the live
+            bot, which does this on the first poll of the next bar.
+            """
+            assert algo_engine is not None
             indicators = indicator_engine.update(bar)
-            pending_order = algo_engine.evaluate(
+            order = algo_engine.evaluate(
                 price=float(bar.close),
                 indicators=indicators,
                 position=paper_engine.position,
                 balance=paper_engine.balance,
                 timestamp=bar.timestamp.timestamp(),
             )
+            if order is None or (order.side == "BUY" and not allow_entry):
+                return
+            prev_side = paper_engine.position.side
+            prev_realized = paper_engine.position.realized_pnl
+            paper_engine._last_price = fill_price
+            paper_engine.execute_order(order)
+            track_position_change(
+                prev_side, prev_realized, False, fill_bar,
+                algo_closed=order.side == "SELL",
+            )
 
-            # Step 4: Track equity (cash + market value of the open position)
-            pos = paper_engine.position
-            equity = paper_engine.balance
-            if pos.side == "LONG":
-                equity += pos.size * float(bar.close)
-            elif pos.side == "SHORT":
-                equity -= pos.size * float(bar.close)
-            equity_curve.append(equity)
+        def open_only(bar: BarData) -> BarData:
+            """The first poll of a bar: only its open price is known."""
+            o = bar.open
+            return BarData(timestamp=bar.timestamp, open=o, high=o, low=o, close=o, volume=0.0)
 
-            # Step 5: Track max drawdown
-            if equity > peak_equity:
-                peak_equity = equity
-            if peak_equity > 0:
-                dd = (peak_equity - equity) / peak_equity
-                if dd > max_drawdown:
-                    max_drawdown = dd
+        tf = timedelta(minutes=self._timeframe_to_minutes())
+        unclosed: BarData | None = None  # last bar seen; closes when the next one opens
 
-        # A signal on the very last bar has no next bar to fill on — dropped.
+        for segment in segments:
+            # The previous segment's last bar was closed by the first poll of
+            # the next bar, before the bot stopped/reconnected.
+            if unclosed is not None:
+                nxt = next(
+                    (b for b in segment.warmup + segment.bars
+                     if b.timestamp == unclosed.timestamp + tf),
+                    None,
+                )
+                if nxt is not None:
+                    mark(open_only(nxt))
+                    close_bar(unclosed, float(nxt.open), nxt)
+                else:
+                    close_bar(unclosed, float(unclosed.close), unclosed)
+                unclosed = None
+
+            # --- (Re)initialize like the live bot does on (re)start ---
+            indicator_engine.initialize(_bars_to_dataframe(segment.warmup))
+            if segment.new_run or algo_engine is None:
+                # Fresh process: new strategy/AlgoEngine; circuit-breaker
+                # baseline = equity (cash + restored position at entry price)
+                pos = paper_engine.position
+                start_equity = paper_engine.balance
+                if pos.side == "LONG":
+                    start_equity += pos.size * pos.entry_price
+                elif pos.side == "SHORT":
+                    start_equity -= pos.size * pos.entry_price
+
+                algo_engine = AlgoEngine(
+                    risk_pct=self._risk_pct,
+                    cooldown_sec=self._cooldown_sec,
+                    initial_session_balance=start_equity,
+                )
+                algo_engine.set_strategy(TrendFilteredMACrossStrategyV3(symbol=self._symbol))
+                algo_engine.enable()
+
+            # Set price reference in paper engine (live: last snapshot close)
+            paper_engine._last_price = float(segment.warmup[-1].close)
+
+            # --- Main loop (NO pandas, NO sleep, NO asyncio) ---
+            # Same order of events as the live bot (headless_main.py), whose
+            # first poll of bar t+1 checks stops at the open, then closes bar t
+            # (signal) and fills at that price; its last poll ≈ the close.
+            # Never fills at a price from before the signal existed.
+            for bar in segment.bars:
+                # Advance simulated clock to bar timestamp
+                sim_clock.set(bar.timestamp.timestamp())
+
+                # Step 1: first poll — stops at the open
+                mark(open_only(bar))
+
+                # Step 2: previous bar closes → strategy → fill at this open
+                if unclosed is not None:
+                    close_bar(unclosed, float(bar.open), bar)
+
+                # Step 3: last poll — stops / trailing at the close
+                mark(bar)
+                unclosed = bar
+
+                # Step 4: Track equity (cash + market value of the open position)
+                pos = paper_engine.position
+                equity = paper_engine.balance
+                if pos.side == "LONG":
+                    equity += pos.size * float(bar.close)
+                elif pos.side == "SHORT":
+                    equity -= pos.size * float(bar.close)
+                equity_curve.append(equity)
+
+                # Step 5: Track max drawdown
+                if equity > peak_equity:
+                    peak_equity = equity
+                if peak_equity > 0:
+                    dd = (peak_equity - equity) / peak_equity
+                    if dd > max_drawdown:
+                        max_drawdown = dd
+
+        # The last bar's signal would fill at the next open, which is not in
+        # the data. Exits fill at the last close (≈ next open); entries are
+        # dropped (they could not be evaluated afterwards anyway).
+        last_bar = unclosed
+        if unclosed is not None:
+            close_bar(unclosed, float(unclosed.close), unclosed, allow_entry=False)
 
         # --- Force-close any open position at end of simulation ---
-        if paper_engine.position.side != "FLAT" and paper_engine.position.size > 0:
+        if last_bar is not None and paper_engine.position.side != "FLAT" and paper_engine.position.size > 0:
             close_order = OrderRequest(
                 symbol=self._symbol,
                 side="SELL",
@@ -649,13 +739,14 @@ class BacktestEngine:
                 profit = paper_engine.position.realized_pnl - prev_realized
                 trade_log.append(TradeLog(
                     entry_time=current_entry["time"],
-                    exit_time=sim_bars[-1].timestamp,
+                    exit_time=last_bar.timestamp,
                     entry_price=current_entry["price"],
-                    exit_price=float(sim_bars[-1].close),
+                    exit_price=float(last_bar.close),
                     profit=profit,
                     side=current_entry["side"],
                     exit_reason="end_of_data",
                     position_usd=current_entry["position_usd"],
+                    balance_after=paper_engine.balance,
                 ))
 
         # --- Calculate metrics ---

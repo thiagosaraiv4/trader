@@ -25,14 +25,14 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
 import pandas as pd
 
 from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
-from core.bar_log import append_bars, bars_from_dataframe
+from core.bar_log import append_bars, bars_from_dataframe, new_run_id
 from core.config import AppConfig
 from core.indicators import (
     ATRIndicator,
@@ -68,7 +68,7 @@ class _HeadlessJsonFormatter(logging.Formatter):
             "trades", "win_rate", "profit_factor", "drawdown",
             "return_pct", "streak", "reason", "elapsed",
             "from_state", "to_state", "error", "provider", "strategy",
-            "retry", "backoff_sec", "consecutive_errors", "position",
+            "retry", "backoff_sec", "consecutive_errors", "position", "equity",
         ):
             val = getattr(record, key, None)
             if val is not None:
@@ -120,6 +120,10 @@ class HeadlessTradingBot:
         self._bar_count: int = 0
         # Latest poll of the still-forming bar (see _on_bar)
         self._forming_bar: BarData | None = None
+        # live_bars.csv segment: "<run>:<snapshot n>" (see core/bar_log.py)
+        self._run_id: str = new_run_id()
+        self._snapshot_no: int = 0
+        self._seg: str = ""
 
         # -- Restore session -----------------------------------------------
         session = load_session(
@@ -210,6 +214,9 @@ class HeadlessTradingBot:
                 "balance": round(self._core.balance, 2),
             },
         )
+        # Persist every fill right away: a Codespace can be stopped without
+        # a graceful SIGTERM, and the 5-min periodic save would lose trades.
+        self.save()
 
     def _on_trade_closed(self, trade: dict[str, Any]) -> None:
         self._update_perf(trade)
@@ -258,9 +265,8 @@ class HeadlessTradingBot:
             else float("inf") if self._perf["gross_profit"] > 0
             else 0.0
         )
-        ret_pct = (
-            (self._core.balance - 10_000.0) / 10_000.0 * 100
-        )
+        # Equity, not cash: cash drops by the position cost while in a trade
+        ret_pct = (self._equity() - 10_000.0) / 10_000.0 * 100
         log.info(
             "performance_snapshot",
             extra={
@@ -274,6 +280,17 @@ class HeadlessTradingBot:
             },
         )
 
+    def _equity(self) -> float:
+        """Cash + market value of the open position."""
+        pos = self._core.position
+        price = self._core._last_price or pos.entry_price
+        equity = self._core.balance
+        if pos.side == "LONG":
+            equity += pos.size * price
+        elif pos.side == "SHORT":
+            equity -= pos.size * price
+        return equity
+
     # -- Data Feed Callbacks -----------------------------------------------
 
     def _on_snapshot(self, df: pd.DataFrame) -> None:
@@ -281,14 +298,21 @@ class HeadlessTradingBot:
         # Exchanges return the still-forming bar as the last row. Indicators
         # must only see closed bars, exactly like the backtest.
         closed_df = df
+        self._forming_bar = None
         tf_sec = self._cfg.default_timeframe.to_seconds()
         if not df.empty and df.index[-1].timestamp() + tf_sec > time.time():
             closed_df = df.iloc[:-1]
-        self._forming_bar = None
+            # Seed with the forming bar: if the first poll already belongs to
+            # the next bar, this one is closed with its snapshot values
+            # instead of being skipped.
+            forming = bars_from_dataframe(df.iloc[-1:])
+            self._forming_bar = forming[0] if forming else None
 
         indicator_series = self._indicator_engine.initialize(closed_df)
         # Warm-up bars too, so run_comparison.py can replay from the same state
-        append_bars(bars_from_dataframe(closed_df))
+        self._snapshot_no += 1
+        self._seg = f"{self._run_id}:{self._snapshot_no}"
+        append_bars(bars_from_dataframe(closed_df), kind="warmup", seg=self._seg)
         log.info(
             "snapshot_loaded",
             extra={
@@ -310,13 +334,31 @@ class HeadlessTradingBot:
         - Indicators + strategy run once per CLOSED bar, as in the backtest.
           A bar counts as closed when the next one starts; its final values
           are those of the last poll (at most one poll interval old).
+        - If whole bars were missed (poll outage), the last poll of the old
+          bar is stale too: re-fetch the snapshot instead of trading on it.
         """
         self._core.update_mark_price(bar)
 
         prev = self._forming_bar
         self._forming_bar = bar
-        if prev is not None and bar.timestamp > prev.timestamp:
-            self._on_bar_closed(prev)
+        if prev is None or bar.timestamp <= prev.timestamp:
+            return
+
+        tf = timedelta(seconds=self._cfg.default_timeframe.to_seconds())
+        if bar.timestamp - prev.timestamp > tf:
+            log.warning(
+                "bars_missed — resyncing snapshot",
+                extra={
+                    "component": "headless",
+                    "reason": f"last bar {prev.timestamp.isoformat()}, now {bar.timestamp.isoformat()}",
+                },
+            )
+            self._forming_bar = None
+            if self._feed is not None:
+                self._feed.request_resync()
+            return
+
+        self._on_bar_closed(prev)
 
     def _on_bar_closed(self, bar: BarData) -> None:
         """
@@ -326,7 +368,7 @@ class HeadlessTradingBot:
             3. PaperTradingCore.execute_order(order) — fills at the live price
         """
         self._bar_count += 1
-        append_bars([bar])
+        append_bars([bar], kind="live", seg=self._seg)
 
         # Step 1: Update indicators — O(1) per indicator
         indicators = self._indicator_engine.update(bar)
@@ -442,7 +484,7 @@ class HeadlessTradingBot:
                 self._emit_performance_log()
 
     def _emit_heartbeat(self) -> None:
-        """Periodic proof of life: last price and closed bars processed."""
+        """Periodic proof of life: last price, closed bars processed, equity."""
         log.info(
             "heartbeat",
             extra={
@@ -451,6 +493,7 @@ class HeadlessTradingBot:
                 "bars": self._bar_count,
                 "position": self._core.position.side,
                 "balance": round(self._core.balance, 2),
+                "equity": round(self._equity(), 2),
             },
         )
 

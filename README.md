@@ -93,7 +93,12 @@ python run_comparison.py
 
 O bot grava cada candle fechado (e o warm-up) em `live_bars.csv`. A comparação roda o backtest
 (mesma estratégia V3, mesmos parâmetros) **sobre exatamente esses candles** e compara com os trades do
-`session.json` — não depende de baixar histórico.
+`session.json` — não depende de baixar histórico. Reinícios (ex.: Codespace parado) e reconexões são
+reproduzidos como aconteceram: candles de quando o bot estava desligado só aquecem os indicadores.
+Uma posição ainda aberta não conta como trade em nenhum dos lados.
+
+Diferença que sobra entre live e backtest: ao vivo os stops são checados a cada poll (5 s); o backtest
+só vê a abertura e o fechamento de cada candle.
 
 Sem `live_bars.csv`, o backtest tenta baixar da Binance; de servidores nos EUA (caso comum no
 Codespaces) ela bloqueia o acesso e a comparação é abortada em vez de usar dados sintéticos.
@@ -119,7 +124,7 @@ bash scripts/watchdog.sh status
 tail -20 logs/bot.log | python -m json.tool --json-lines
 ```
 
-### 3. Prova de vida (a cada 5 min: preço atual, candles processados, posição)
+### 3. Prova de vida (a cada 5 min: preço atual, candles processados, posição, patrimônio)
 
 ```bash
 grep '"heartbeat"' logs/bot.log | tail -1 | python -m json.tool

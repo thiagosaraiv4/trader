@@ -397,6 +397,7 @@ class DataFeedManager:
         self._state: FeedState = FeedState.IDLE
         self._stop_event: asyncio.Event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._resync_requested: bool = False
 
         self._log = get_logger(
             __name__,
@@ -417,6 +418,10 @@ class DataFeedManager:
         self._stop_event.clear()
         self._task = asyncio.create_task(self._run_loop())
         self._log.info("Feed started")
+
+    def request_resync(self) -> None:
+        """Re-fetch the snapshot after the current poll (e.g. bars were missed)."""
+        self._resync_requested = True
 
     async def stop(self) -> None:
         """Signal the feed to stop and wait for the task to complete."""
@@ -482,6 +487,11 @@ class DataFeedManager:
 
                         self._on_bar_update(bar)
                         consecutive_errors = 0  # Reset on success
+
+                        if self._resync_requested:
+                            self._resync_requested = False
+                            self._log.info("Resync requested — re-fetching snapshot")
+                            break
 
                     except Exception as poll_err:
                         consecutive_errors += 1

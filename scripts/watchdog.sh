@@ -80,8 +80,11 @@ on_stop_signal() {
 }
 
 do_start() {
-    if pid_matches "$(read_pid "${PID_FILE}")" "watchdog.sh"; then
-        echo "Watchdog already running (pid=$(read_pid "${PID_FILE}")). Use 'stop' first."
+    local old_pid
+    old_pid=$(read_pid "${PID_FILE}")
+    # After a Codespace restart the stale PID can even be our own
+    if [ "${old_pid}" != "$$" ] && pid_matches "${old_pid}" "watchdog.sh"; then
+        echo "Watchdog already running (pid=${old_pid}). Use 'stop' first."
         exit 1
     fi
 

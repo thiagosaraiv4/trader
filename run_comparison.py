@@ -5,8 +5,12 @@ Script para ser executado após alguns dias de live trading (ex.: 5º dia).
 
 Compara o robô ao vivo (`session.json`) com o `BacktestEngine` rodando a MESMA
 estratégia (V3) sobre as MESMAS barras que o robô viu (`live_bars.csv`, gravado
-pelo headless_main.py). Verifica a divergência entre Gêmeo Digital empírico e
-motor teórico. Se diverge > 20%, suspeita de falhas.
+pelo headless_main.py). Reinícios do robô (ex.: Codespace parado) viram segmentos:
+as barras de quando ele estava desligado só aquecem os indicadores, como ao vivo.
+Verifica a divergência entre Gêmeo Digital empírico e motor teórico. Se diverge
+> 20%, suspeita de falhas.
+
+Posições ainda abertas no fim não contam como trade (nem ao vivo nem no backtest).
 
 Sem `live_bars.csv`, baixa o histórico via ccxt/Binance — bloqueada em servidores
 nos EUA (Codespaces). Se o backtest cair para dados sintéticos, a comparação é
@@ -18,14 +22,14 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
-from core.backtest_engine import BacktestEngine
-from core.bar_log import BAR_LOG_PATH, load_bars
+from core.backtest_engine import BacktestEngine, BacktestResult
+from core.bar_log import BAR_LOG_PATH, load_segments
 from core.config import AppConfig
 from core.session import load_session
 
-# Warm-up = the live bot's snapshot (headless_main.py: 200 closed bars)
-_LIVE_WARMUP_BARS = 200
 _INITIAL_BALANCE = 10_000.0
+# Bars the strategy needs before it can signal (ATR window of 14 + previous EMA/SMA)
+_STRATEGY_WARMUP_BARS = 15
 
 
 def _parse_ts(value: Any) -> datetime:
@@ -65,6 +69,33 @@ def _compute_live_metrics(trades: list[dict], initial_balance: float) -> dict:
     }
 
 
+def _compute_backtest_metrics(
+    result: BacktestResult,
+    initial_balance: float,
+    min_entry: datetime | None = None,
+) -> dict:
+    """Same metrics as the live side, from closed trades only (no end-of-data close)."""
+    trades = [
+        t for t in result.trade_log
+        if t.exit_reason != "end_of_data"
+        and (min_entry is None or t.entry_time >= min_entry)
+    ]
+    if not trades:
+        return {"total_trades": 0, "win_rate": 0.0, "profit_factor": 0.0, "return_pct": 0.0}
+
+    gross_profit = sum(t.profit for t in trades if t.profit > 0)
+    gross_loss = abs(sum(t.profit for t in trades if t.profit < 0))
+    wins = sum(1 for t in trades if t.profit > 0)
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
+
+    return {
+        "total_trades": len(trades),
+        "win_rate": wins / len(trades) * 100,
+        "profit_factor": profit_factor,
+        "return_pct": (trades[-1].balance_after - initial_balance) / initial_balance * 100,
+    }
+
+
 def _divergence(live: float, backtest: float) -> float:
     """Relative divergence in %, safe for zeros and infinite profit factors."""
     if math.isinf(live) or math.isinf(backtest):
@@ -88,28 +119,43 @@ def compare_live_with_backtest() -> None:
         print("[!] Nenhuma sessao ao vivo com log gravado. Abortando.")
         return
 
-    live_bars = load_bars()
-    if len(live_bars) >= _LIVE_WARMUP_BARS + 10:
-        # Replay exactly what the live bot saw: same warm-up, same bars
-        window_start = live_bars[_LIVE_WARMUP_BARS].timestamp
-        window_end = live_bars[-1].timestamp + tf
-        print(f"[*] Replay de {len(live_bars)} barras gravadas pelo robô ({BAR_LOG_PATH.name})")
+    segments = load_segments()
+    bt_min_entry: datetime | None = None
+    if segments:
+        # Replay exactly what the live bot saw, restart by restart
+        window_start = segments[0].bars[0].timestamp
+        # The signal of the last recorded bar fills at the first poll of the
+        # next bar (a few seconds in); later live activity was not recorded.
+        window_end = segments[-1].bars[-1].timestamp + tf + timedelta(seconds=30)
+        n_bars = sum(len(seg.bars) for seg in segments)
+        restarts = sum(1 for seg in segments[1:] if seg.new_run)
+        print(
+            f"[*] Replay de {n_bars} barras gravadas pelo robô ({BAR_LOG_PATH.name}): "
+            f"{len(segments)} segmento(s), {restarts} reinício(s)"
+        )
         engine = BacktestEngine(
             symbol=str(cfg.default_symbol),
             timeframe=cfg.default_timeframe.value,
             initial_balance=_INITIAL_BALANCE,
-            bars=live_bars,
-            warmup_bars=_LIVE_WARMUP_BARS,
+            segments=segments,
         )
     else:
-        window_start = _parse_ts(session.trade_log[0]["timestamp"])
+        first_fill = _parse_ts(session.trade_log[0]["timestamp"])
+        tf_sec = int(tf.total_seconds())
+        first_bar = datetime.fromtimestamp(
+            int(first_fill.timestamp()) // tf_sec * tf_sec, tz=first_fill.tzinfo,
+        )
+        # Start early enough for the strategy to be able to signal the first
+        # live entry; backtest trades entered before it are ignored.
+        window_start = first_bar
+        bt_min_entry = first_bar
         window_end = _parse_ts(session.trade_log[-1]["timestamp"]) + tf
-        print(f"[*] {BAR_LOG_PATH.name} ausente ou curto — baixando histórico via ccxt")
+        print(f"[*] {BAR_LOG_PATH.name} ausente — baixando histórico via ccxt")
         engine = BacktestEngine(
             symbol=str(cfg.default_symbol),
             timeframe=cfg.default_timeframe.value,
             initial_balance=_INITIAL_BALANCE,
-            start_date=window_start,
+            start_date=first_bar - _STRATEGY_WARMUP_BARS * tf,
             end_date=window_end,
             use_ccxt=True,
         )
@@ -144,12 +190,10 @@ def compare_live_with_backtest() -> None:
         print("[!] Backtest falhou em gerar relatórios (dados insuficientes?).")
         return
 
-    bt_metrics = {
-        "total_trades": bt_res.total_trades,
-        "win_rate": bt_res.win_rate * 100,               # ratio 0..1
-        "profit_factor": bt_res.profit_factor,
-        "return_pct": bt_res.total_return_pct * 100,     # ratio
-    }
+    bt_metrics = _compute_backtest_metrics(bt_res, _INITIAL_BALANCE, bt_min_entry)
+
+    if session.position and session.position.get("side") not in (None, "FLAT"):
+        print("[i] O robô está com posição aberta — ela não entra na comparação.")
 
     print("\n============================================================")
     print(f" LIVE vs BACKTEST (DIVERGÊNCIA ACEITÁVEL < 20%) — dados: {bt_res.data_source}")
