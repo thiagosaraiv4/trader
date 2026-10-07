@@ -18,6 +18,8 @@ Lookahead bias prevention:
     - Each bar is fed to IndicatorEngine.update() BEFORE strategy evaluation
     - The strategy's on_tick() receives ONLY current price and current indicator values
     - No future data is ever accessible to the decision pipeline
+    - Orders signalled at the close of bar t fill at the open of bar t+1
+      (same timing as the live bot), never at an earlier price
 
 Overfitting mitigation:
     - Use out-of-sample testing: split data 70/30 (train/test)
@@ -48,7 +50,7 @@ import pandas as pd
 
 from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
 from core.indicators import EMAIndicator, IndicatorEngine, SMAIndicator, ATRIndicator
-from core.paper_trading import PaperTradingCore
+from core.paper_trading import OrderRequest, PaperTradingCore
 from core.types import BarData
 from utils.logger import get_logger
 
@@ -100,6 +102,7 @@ class BacktestResult:
     max_position_usd: float = 0.0
     trades_per_month_avg: float = 0.0
     low_sample_warning: bool = False
+    data_source: str = ""  # "preloaded" | "ccxt/binance" | "synthetic"
     equity_curve: list[float] = field(default_factory=list)
     trade_log: list[TradeLog] = field(default_factory=list)
 
@@ -124,6 +127,7 @@ class BacktestResult:
             f"  Max Drawdown:    {self.max_drawdown:.2%}",
             f"  Trades/Month:    {self.trades_per_month_avg:.1f}",
             f"  Sample Warning:  {'YES' if self.low_sample_warning else 'NO'}",
+            f"  Data Source:     {self.data_source}",
             f"  Initial Balance: ${self.initial_balance:,.2f}",
             f"  Final Balance:   ${self.final_balance:,.2f}",
             f"  Total Return:    {self.total_return_pct:.2%}",
@@ -224,11 +228,13 @@ def _load_data_ccxt(
     timeframe: str,
     start_date: datetime,
     end_date: datetime,
-) -> list[BarData]:
+    timeframe_minutes: int = 1,
+) -> tuple[list[BarData], str]:
     """
     Load historical OHLCV via ccxt (synchronous) with pagination.
 
     Falls back to synthetic data if ccxt/Binance is unavailable.
+    Returns (bars, source) where source is "ccxt/binance" or "synthetic".
 
     Pagination: Binance allows max 1000 candles per request.
     Rate limiting: ccxt handles this internally with enableRateLimit.
@@ -281,7 +287,10 @@ def _load_data_ccxt(
 
         if not all_ohlcv:
             log.warning("No data from ccxt — falling back to synthetic data")
-            return _generate_synthetic_bars(symbol, start_date, end_date)
+            return (
+                _generate_synthetic_bars(symbol, start_date, end_date, timeframe_minutes),
+                "synthetic",
+            )
 
         # Convert to BarData
         bars: list[BarData] = []
@@ -300,14 +309,17 @@ def _load_data_ccxt(
             "Historical data loaded",
             extra={"bars": len(bars), "source": "ccxt/binance"},
         )
-        return bars
+        return bars, "ccxt/binance"
 
     except Exception as exc:
         log.warning(
             "ccxt fetch failed — using synthetic data",
             extra={"error": str(exc)},
         )
-        return _generate_synthetic_bars(symbol, start_date, end_date)
+        return (
+            _generate_synthetic_bars(symbol, start_date, end_date, timeframe_minutes),
+            "synthetic",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +386,16 @@ class BacktestEngine:
         cooldown_sec: float = 180.0,
         risk_pct: float = 0.02,
         use_ccxt: bool = True,
+        bars: list[BarData] | None = None,
+        warmup_bars: int | None = None,
     ) -> None:
+        """
+        Args:
+            bars: Pre-loaded bars (e.g. recorded by the live bot). When given,
+                no data is downloaded and start_date/end_date are ignored.
+            warmup_bars: Bars used only to initialize indicators
+                (default _WARMUP_BARS). The simulation starts after them.
+        """
         self._symbol = symbol
         self._timeframe = timeframe
         self._start_date = start_date or datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -384,6 +405,8 @@ class BacktestEngine:
         self._cooldown_sec = cooldown_sec
         self._risk_pct = risk_pct
         self._use_ccxt = use_ccxt
+        self._preloaded_bars = bars
+        self._warmup_bars = warmup_bars if warmup_bars is not None else self._WARMUP_BARS
 
     def run(self) -> BacktestResult:
         """
@@ -409,32 +432,45 @@ class BacktestEngine:
             },
         )
 
-        # 1. Load data
-        if self._use_ccxt:
-            bars = _load_data_ccxt(
-                self._symbol, self._timeframe,
-                self._start_date, self._end_date,
-            )
+        # 1. Load data. Warm-up bars are fetched BEFORE start_date so the
+        #    simulated (traded) period is exactly [start_date, end_date].
+        tf_minutes = self._timeframe_to_minutes()
+        if self._preloaded_bars is not None:
+            bars = list(self._preloaded_bars)
+            data_source = "preloaded"
         else:
-            bars = _generate_synthetic_bars(
-                self._symbol, self._start_date, self._end_date,
-                timeframe_minutes=self._timeframe_to_minutes(),
-            )
+            data_start = self._start_date - timedelta(minutes=tf_minutes * self._warmup_bars)
+            if self._use_ccxt:
+                bars, data_source = _load_data_ccxt(
+                    self._symbol, self._timeframe,
+                    data_start, self._end_date,
+                    timeframe_minutes=tf_minutes,
+                )
+            else:
+                bars = _generate_synthetic_bars(
+                    self._symbol, data_start, self._end_date,
+                    timeframe_minutes=tf_minutes,
+                )
+                data_source = "synthetic"
 
-        if len(bars) < self._WARMUP_BARS + 10:
+        if len(bars) < self._warmup_bars + 10:
             log.error(
                 "Insufficient data for backtest",
-                extra={"bars": len(bars), "minimum": self._WARMUP_BARS + 10},
+                extra={"bars": len(bars), "minimum": self._warmup_bars + 10},
             )
-            return BacktestResult(initial_balance=self._initial_balance)
+            return BacktestResult(
+                initial_balance=self._initial_balance,
+                data_source=data_source,
+            )
 
         log.info(
             "Data loaded",
-            extra={"total_bars": len(bars), "warmup": self._WARMUP_BARS},
+            extra={"total_bars": len(bars), "warmup": self._warmup_bars, "source": data_source},
         )
 
         # 2. Run simulation
         result = self._simulate(bars)
+        result.data_source = data_source
 
         # 3. Log results
         self._log_results(result)
@@ -463,7 +499,11 @@ class BacktestEngine:
         )
 
         # Same algo engine as production, now managing cooldown
-        algo_engine = AlgoEngine(risk_pct=self._risk_pct, cooldown_sec=180.0)
+        algo_engine = AlgoEngine(
+            risk_pct=self._risk_pct,
+            cooldown_sec=self._cooldown_sec,
+            initial_session_balance=self._initial_balance,
+        )
         algo_engine.set_strategy(strategy)
         algo_engine.enable()
 
@@ -478,8 +518,8 @@ class BacktestEngine:
         paper_engine = PaperTradingCore(initial_balance=self._initial_balance)
 
         # --- Warmup: initialize indicators with first N bars ---
-        warmup_bars = bars[:self._WARMUP_BARS]
-        sim_bars = bars[self._WARMUP_BARS:]
+        warmup_bars = bars[:self._warmup_bars]
+        sim_bars = bars[self._warmup_bars:]
 
         warmup_df = _bars_to_dataframe(warmup_bars)
         indicator_engine.initialize(warmup_df)
@@ -493,52 +533,27 @@ class BacktestEngine:
         current_entry: dict | None = None
         peak_equity: float = self._initial_balance
         max_drawdown: float = 0.0
+        pending_order: OrderRequest | None = None
 
-        # --- Main loop (NO pandas, NO sleep, NO asyncio) ---
-        for bar in sim_bars:
-            # Advance simulated clock to bar timestamp
-            sim_clock.set(bar.timestamp.timestamp())
+        def track_position_change(
+            prev_side: str,
+            prev_realized: float,
+            was_trailing_active: bool,
+            bar: BarData,
+            algo_closed: bool,
+        ) -> None:
+            """Record an opened/closed position after a fill or a mark-price update."""
+            nonlocal current_entry
+            pos = paper_engine.position
 
-            # Snapshot position state BEFORE processing
-            prev_side = paper_engine.position.side
-            prev_realized = paper_engine.position.realized_pnl
-            was_trailing_active = paper_engine.position.trailing_active
-
-            # Step 1: Compute indicators incrementally — O(1)
-            indicators = indicator_engine.update(bar)
-
-            # Step 2: Algo engine evaluation (same production pipeline)
-            order = algo_engine.evaluate(
-                price=float(bar.close),
-                indicators=indicators,
-                position=paper_engine.position,
-                balance=paper_engine.balance,
-                timestamp=bar.timestamp.timestamp(),
-            )
-
-            algo_closed = False
-            # Step 3: Execute order (if any) — same PaperTradingCore
-            if order is not None:
-                paper_engine.execute_order(order)
-                if order.side == "SELL" and prev_side != "FLAT":
-                    algo_closed = True
-
-            # Step 4: Update mark price → PnL + pending limit orders
-            paper_engine.update_mark_price(bar)
-
-            # Step 5: Detect position changes → trade log
-            curr_side = paper_engine.position.side
-
-            if prev_side == "FLAT" and curr_side != "FLAT":
-                # Position opened
+            if prev_side == "FLAT" and pos.side != "FLAT":
                 current_entry = {
                     "time": bar.timestamp,
-                    "price": paper_engine.position.entry_price,
-                    "side": curr_side,
-                    "position_usd": paper_engine.position.size * paper_engine.position.entry_price,
+                    "price": pos.entry_price,
+                    "side": pos.side,
+                    "position_usd": pos.size * pos.entry_price,
                 }
-
-            if prev_side != "FLAT" and curr_side == "FLAT" and current_entry is not None:
+            elif prev_side != "FLAT" and pos.side == "FLAT" and current_entry is not None:
                 if algo_closed:
                     exit_reason = "momentum"
                 elif was_trailing_active:
@@ -546,27 +561,69 @@ class BacktestEngine:
                 else:
                     exit_reason = "hard_stop"
 
-                # Position closed — record trade
-                profit = paper_engine.position.realized_pnl - prev_realized
                 trade_log.append(TradeLog(
                     entry_time=current_entry["time"],
                     exit_time=bar.timestamp,
                     entry_price=current_entry["price"],
-                    exit_price=float(bar.close),
-                    profit=profit,
+                    exit_price=float(paper_engine.trade_log[-1]["price"]),
+                    profit=pos.realized_pnl - prev_realized,
                     side=current_entry["side"],
                     exit_reason=exit_reason,
                     position_usd=current_entry["position_usd"],
                 ))
                 current_entry = None
 
-            # Step 6: Track equity
+        # --- Main loop (NO pandas, NO sleep, NO asyncio) ---
+        # Same order of events as the live bot (headless_main.py):
+        #   a signal is computed when bar t closes and fills at the next
+        #   available price (open of bar t+1) — never at a price from before
+        #   the signal existed.
+        for bar in sim_bars:
+            # Advance simulated clock to bar timestamp
+            sim_clock.set(bar.timestamp.timestamp())
+
+            # Step 1: Fill the order signalled at the previous close, at this open
+            if pending_order is not None:
+                prev_side = paper_engine.position.side
+                prev_realized = paper_engine.position.realized_pnl
+                paper_engine._last_price = float(bar.open)
+                paper_engine.execute_order(pending_order)
+                track_position_change(
+                    prev_side, prev_realized, False, bar,
+                    algo_closed=pending_order.side == "SELL",
+                )
+                pending_order = None
+
+            # Step 2: Mark price at close → PnL, trailing activation, stops
+            prev_side = paper_engine.position.side
+            prev_realized = paper_engine.position.realized_pnl
+            was_trailing_active = paper_engine.position.trailing_active
+            paper_engine.update_mark_price(bar)
+            track_position_change(
+                prev_side, prev_realized, was_trailing_active, bar,
+                algo_closed=False,
+            )
+
+            # Step 3: Indicators + strategy on the closed bar → order for next open
+            indicators = indicator_engine.update(bar)
+            pending_order = algo_engine.evaluate(
+                price=float(bar.close),
+                indicators=indicators,
+                position=paper_engine.position,
+                balance=paper_engine.balance,
+                timestamp=bar.timestamp.timestamp(),
+            )
+
+            # Step 4: Track equity (cash + market value of the open position)
+            pos = paper_engine.position
             equity = paper_engine.balance
-            if paper_engine.position.side != "FLAT":
-                equity += paper_engine.position.unrealized_pnl
+            if pos.side == "LONG":
+                equity += pos.size * float(bar.close)
+            elif pos.side == "SHORT":
+                equity -= pos.size * float(bar.close)
             equity_curve.append(equity)
 
-            # Step 7: Track max drawdown
+            # Step 5: Track max drawdown
             if equity > peak_equity:
                 peak_equity = equity
             if peak_equity > 0:
@@ -574,9 +631,10 @@ class BacktestEngine:
                 if dd > max_drawdown:
                     max_drawdown = dd
 
+        # A signal on the very last bar has no next bar to fill on — dropped.
+
         # --- Force-close any open position at end of simulation ---
         if paper_engine.position.side != "FLAT" and paper_engine.position.size > 0:
-            from core.paper_trading import OrderRequest
             close_order = OrderRequest(
                 symbol=self._symbol,
                 side="SELL",
@@ -596,6 +654,8 @@ class BacktestEngine:
                     exit_price=float(sim_bars[-1].close),
                     profit=profit,
                     side=current_entry["side"],
+                    exit_reason="end_of_data",
+                    position_usd=current_entry["position_usd"],
                 ))
 
         # --- Calculate metrics ---

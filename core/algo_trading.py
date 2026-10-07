@@ -675,8 +675,16 @@ class AlgoEngine:
         if self._strategy is None:
             return None
 
-        # O(1) Circuit breaker check
-        if balance < self._initial_session_balance * 0.93 and not self._halted:
+        # O(1) Circuit breaker check — on equity (cash + open position value).
+        # Cash alone drops by the position cost on every entry, which would
+        # trip the breaker right after the first trade.
+        equity = balance
+        if position is not None and position.size > 0:
+            if position.side == "LONG":
+                equity += position.size * price
+            elif position.side == "SHORT":
+                equity -= position.size * price
+        if equity < self._initial_session_balance * 0.93 and not self._halted:
             self._halted = True
             reason = "Drawdown >= 7% of session start balance"
             self._log.critical("CIRCUIT BREAKER TRIGGERED: " + reason)

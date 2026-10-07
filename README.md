@@ -91,9 +91,15 @@ Para rodar em primeiro plano (debug), pare o watchdog antes e use `python headle
 python run_comparison.py
 ```
 
-O backtest baixa histórico da Binance; de servidores nos EUA (caso comum no Codespaces) a Binance
-bloqueia o acesso e o backtest cai para **dados sintéticos** (aparece o aviso
-`ccxt fetch failed — using synthetic data`). Nesse caso o resultado da comparação não vale.
+O bot grava cada candle fechado (e o warm-up) em `live_bars.csv`. A comparação roda o backtest
+(mesma estratégia V3, mesmos parâmetros) **sobre exatamente esses candles** e compara com os trades do
+`session.json` — não depende de baixar histórico.
+
+Sem `live_bars.csv`, o backtest tenta baixar da Binance; de servidores nos EUA (caso comum no
+Codespaces) ela bloqueia o acesso e a comparação é abortada em vez de usar dados sintéticos.
+
+Para começar uma comparação limpa (ex.: depois de trocar a estratégia), mova `session.json` e
+`live_bars.csv` para outra pasta com o bot parado.
 
 ---
 
@@ -166,7 +172,9 @@ O arquivo `session.json` armazena o estado financeiro da sessão:
 - Posição aberta (se houver)
 - Histórico completo de trades
 
-**⚠️ `session.json` está no `.gitignore` — nunca é commitado.**
+O arquivo `live_bars.csv` guarda os candles que o bot usou (para `run_comparison.py`).
+
+**⚠️ `session.json` e `live_bars.csv` estão no `.gitignore` — nunca são commitados.**
 
 Salvamento automático:
 - A cada 300 segundos (5 min)
@@ -180,7 +188,7 @@ Salvamento automático:
 |---|---|
 | Dados de mercado | ccxt (Binance público) |
 | Indicadores | NumPy (O(1) incremental) |
-| Estratégia | TrendFilteredMACross V2/V3 |
+| Estratégia | TrendFilteredMACross V3 (live e backtest) |
 | Execução | Paper Trading (0.1% comissão) |
 | UI (Desktop) | PySide6 + pyqtgraph |
 | Event Loop (Desktop) | qasync |

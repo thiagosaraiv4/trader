@@ -2,6 +2,7 @@
 session.json
 session.tmp
 session.lock
+live_bars.csv
 
 # Logs
 logs/

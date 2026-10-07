@@ -31,7 +31,8 @@ from typing import Any, TextIO
 
 import pandas as pd
 
-from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV2
+from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
+from core.bar_log import append_bars, bars_from_dataframe
 from core.config import AppConfig
 from core.indicators import (
     ATRIndicator,
@@ -142,12 +143,22 @@ class HeadlessTradingBot:
         )
 
         # -- Algo Engine + Strategy ----------------------------------------
+        # Circuit breaker baseline = equity, not cash (a restored open
+        # position has its cost already deducted from the cash balance).
+        pos = self._core.position
+        start_equity = self._core.balance
+        if pos.side == "LONG":
+            start_equity += pos.size * pos.entry_price
+        elif pos.side == "SHORT":
+            start_equity -= pos.size * pos.entry_price
+
+        # Same strategy and parameters as BacktestEngine / run_comparison.py
         self._algo_engine = AlgoEngine(
             risk_pct=0.02,
             cooldown_sec=180.0,
-            initial_session_balance=self._core.balance,
+            initial_session_balance=start_equity,
         )
-        strategy = TrendFilteredMACrossStrategyV2(
+        strategy = TrendFilteredMACrossStrategyV3(
             symbol=str(cfg.default_symbol),
         )
         self._algo_engine.set_strategy(strategy)
@@ -159,7 +170,7 @@ class HeadlessTradingBot:
             "wins": 0,
             "gross_profit": 0.0,
             "gross_loss": 0.0,
-            "peak_balance": self._core.balance,
+            "peak_balance": start_equity,
             "max_drawdown_pct": 0.0,
             "streak": 0,
         }
@@ -276,6 +287,8 @@ class HeadlessTradingBot:
         self._forming_bar = None
 
         indicator_series = self._indicator_engine.initialize(closed_df)
+        # Warm-up bars too, so run_comparison.py can replay from the same state
+        append_bars(bars_from_dataframe(closed_df))
         log.info(
             "snapshot_loaded",
             extra={
@@ -313,6 +326,7 @@ class HeadlessTradingBot:
             3. PaperTradingCore.execute_order(order) — fills at the live price
         """
         self._bar_count += 1
+        append_bars([bar])
 
         # Step 1: Update indicators — O(1) per indicator
         indicators = self._indicator_engine.update(bar)
