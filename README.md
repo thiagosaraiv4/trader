@@ -185,6 +185,25 @@ bot retoma ao reabrir. Para rodar 24/7 de verdade, use uma VPS/VM e o mesmo `wat
 
 ---
 
+## VM 24/7 (Oracle Cloud Always Free, Azure, etc.)
+
+Numa VM Ubuntu, o bot roda como serviço do sistema (sobe no boot, reinicia se cair):
+
+```bash
+git clone https://github.com/thiagosaraiv4/trader.git && cd trader
+bash scripts/install_vm.sh
+```
+
+```bash
+sudo systemctl status trading-bot     # está rodando?
+tail -f logs/bot.log                  # logs
+git pull && sudo systemctl restart trading-bot   # atualizar
+```
+
+Na VM use o serviço **ou** o `watchdog.sh`, nunca os dois.
+
+---
+
 ## Persistência
 
 O arquivo `session.json` armazena o estado financeiro da sessão:
