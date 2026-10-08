@@ -58,8 +58,9 @@ _GRID: dict[str, list] = {
     "stop_atr": [1.5, 2.5],
     "trail": [(0.003, 1.0), (0.006, 1.5)],
 }
-_MIN_TRAIN_TRADES = 10
-_MIN_TEST_TRADES = 5
+# Fewer trades than this is indistinguishable from luck
+_MIN_TRAIN_TRADES = 30
+_MIN_TEST_TRADES = 20
 
 
 def _parse_date(value: str) -> datetime:
@@ -277,6 +278,8 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
 
     candidates = [replace(p, timeframe=current.timeframe, max_position_pct=current.max_position_pct)
                   for p in _grid()]
+    # The engine warns about small samples on every run; the table already shows trade counts
+    logging.getLogger().setLevel(logging.ERROR)
     print(f"[*] Testando {len(candidates)} combinações no treino...")
     scored = []
     for i, p in enumerate(candidates, 1):
@@ -286,7 +289,7 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
 
     eligible = [(p, m) for p, m in scored if m["trades"] >= _MIN_TRAIN_TRADES]
     if not eligible:
-        print(f"[!] Nenhuma combinação fez {_MIN_TRAIN_TRADES}+ trades no treino. Use um período maior.")
+        print(f"[!] Nenhuma combinação fez {_MIN_TRAIN_TRADES}+ trades no treino. Use um período maior (--days).")
         return
     eligible.sort(key=lambda pm: pm[1]["net_ret"], reverse=True)
     top = eligible[:5]
