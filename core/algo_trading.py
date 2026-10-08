@@ -469,6 +469,64 @@ class TrendFilteredMACrossStrategyV3:
         return "NONE"
 
 # ---------------------------------------------------------------------------
+# TrendFollowStrategyV4 — Donchian breakout
+# ---------------------------------------------------------------------------
+
+class TrendFollowStrategyV4:
+    """
+    Classic trend following on closed bars (designed for 4h/1d):
+        LONG  when close > highest high of the previous `donchian_entry` bars
+              (and close > SMA(trend_sma) unless trend_sma == 0)
+        FLAT  when close < lowest low of the previous `donchian_exit` bars
+    Hard stop / trailing stop are handled by AlgoEngine + PaperTradingCore.
+    Returns `LONG`, `FLAT` or `NONE` like V3.
+    """
+
+    def __init__(self, symbol: str = "BTC/USDT", params: StrategyParams | None = None) -> None:
+        self._symbol: str = symbol
+        self._params: StrategyParams = params or StrategyParams.defaults_for("trend_v4")
+        self._log = get_logger(__name__, component="trend_follow_v4")
+
+    @property
+    def name(self) -> str:
+        return "TrendFollowV4"
+
+    @property
+    def symbol(self) -> str:
+        return self._symbol
+
+    def on_tick(
+        self,
+        current_price: float,
+        indicators: dict[str, float | None],
+        current_position: Position | None,
+    ) -> str:
+        p = self._params
+        high = indicators.get(f"DCH_{p.donchian_entry}")
+        low = indicators.get(f"DCL_{p.donchian_exit}")
+        atr = indicators.get("ATR_14")
+        trend = indicators.get(f"SMA_{p.trend_sma}") if p.trend_sma > 0 else None
+        if high is None or low is None or atr is None or (p.trend_sma > 0 and trend is None):
+            return "NONE"
+
+        has_position = (
+            current_position is not None
+            and current_position.side != "FLAT"
+            and current_position.size > 0
+        )
+        if has_position:
+            if current_price < low:
+                self._log.info("📉 Channel low broken — exit", extra={"price": current_price})
+                return "FLAT"
+            return "NONE"
+
+        if current_price > high and (trend is None or current_price > trend):
+            self._log.info("📈 Channel breakout — entry", extra={"price": current_price, "atr": atr})
+            return "LONG"
+        return "NONE"
+
+
+# ---------------------------------------------------------------------------
 # RiskManager
 # ---------------------------------------------------------------------------
 
@@ -775,7 +833,7 @@ class AlgoEngine:
                 final_qty = self._risk_manager.size_order(
                     balance, price, stop_price,
                     max_position_pct=p.max_position_pct,
-                    fallback_realistic_stop=True,
+                    fallback_realistic_stop=not p.risk_sizing,
                 )
                 if final_qty <= 0:
                     self._log.info("Order REJECTED by risk manager (size <= 0)")

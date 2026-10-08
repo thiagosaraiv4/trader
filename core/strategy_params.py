@@ -21,9 +21,15 @@ _log = get_logger(__name__, component="strategy_params")
 PARAMS_PATH = Path(__file__).resolve().parent.parent / "strategy.json"
 
 
+STRATEGIES = ("ma_cross_v3", "trend_v4")
+
+
 @dataclass(frozen=True)
 class StrategyParams:
-    # Candle size the live bot trades (ccxt string: 1m, 5m, 15m, ...)
+    # "ma_cross_v3": EMA9 × SMA20 cross with filters (original)
+    # "trend_v4":    Donchian breakout trend following
+    strategy: str = "ma_cross_v3"
+    # Candle size the live bot trades (ccxt string: 1m, 5m, 15m, 4h, ...)
     timeframe: str = "1m"
 
     # --- Entry -----------------------------------------------------------
@@ -49,6 +55,35 @@ class StrategyParams:
     trail_min_pct: float = 0.005
     # Position size cap as a fraction of balance
     max_position_pct: float = 0.20
+    # Size by the real stop distance (loss at stop ≈ risk_pct of balance);
+    # False = legacy V3 sizing (always the max_position_pct cap)
+    risk_sizing: bool = False
+
+    # --- trend_v4 (Donchian) ---------------------------------------------
+    # Buy when the close breaks the highest high of the previous N bars;
+    # sell when it breaks the lowest low of the previous M bars.
+    donchian_entry: int = 20
+    donchian_exit: int = 10
+    # Only buy above SMA(trend_sma); 0 disables the filter
+    trend_sma: int = 200
+
+    @classmethod
+    def defaults_for(cls, strategy: str) -> StrategyParams:
+        """Sensible starting point for each strategy."""
+        if strategy == "trend_v4":
+            return cls(
+                strategy="trend_v4",
+                timeframe="4h",
+                stop_atr=3.0,
+                trail_activation_pct=0.0,
+                trail_atr=4.0,
+                trail_min_pct=0.0,
+                max_position_pct=0.95,
+                risk_sizing=True,
+            )
+        if strategy == "ma_cross_v3":
+            return cls()
+        raise ValueError(f"Unknown strategy {strategy!r} (options: {', '.join(STRATEGIES)})")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -118,6 +118,20 @@ a atual. Para o robô passar a usar: `sudo systemctl restart trading-bot`. Ao ve
 ele arquiva a sessão anterior em `archive/` e começa do zero, para a validação ao vivo não misturar
 configurações.
 
+### Estratégias disponíveis
+
+| `strategy` | Ideia | Timeframe padrão |
+|---|---|---|
+| `ma_cross_v3` | cruzamento EMA9 × SMA20 com filtros (original) | 1m |
+| `trend_v4` | seguir tendência: compra no rompimento da máxima de N candles (canal de Donchian), sai na perda da mínima de M candles ou no stop móvel; posição dimensionada pelo risco (~2% do capital no stop) | 4h |
+
+```bash
+python run_backtest.py --strategy trend_v4 --optimize          # 6 anos de 4h: 4 de treino, 2 de validação
+python run_backtest.py --strategy trend_v4 --optimize --save   # grava se aprovada
+```
+
+A tabela mostra também **comprar e segurar** no mesmo período, como referência.
+
 ### Rodar comparação Live vs Backtest
 
 ```bash

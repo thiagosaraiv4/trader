@@ -342,6 +342,81 @@ class ATRIndicator:
 
 
 # ---------------------------------------------------------------------------
+# Donchian channel — highest high / lowest low of the PREVIOUS N bars
+# ---------------------------------------------------------------------------
+
+class _DonchianBase:
+    """
+    Extreme of the previous `period` bars, excluding the current one, so
+    "close > channel high" means the bar broke out of the prior range.
+
+    O(period) per update over a deque — fine for period <= a few hundred.
+    """
+
+    _field: str = "high"
+    _prefix: str = "DC"
+
+    def __init__(self, period: int = 20) -> None:
+        self._period: int = period
+        self._name: str = f"{self._prefix}_{period}"
+        self._window: deque[float] = deque(maxlen=period)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def period(self) -> int:
+        return self._period
+
+    def _extreme(self, values) -> float:
+        raise NotImplementedError
+
+    def _rolling(self, series: pd.Series) -> pd.Series:
+        raise NotImplementedError
+
+    def initialize(self, df: pd.DataFrame) -> pd.Series:
+        values = df[self._field].astype(np.float64)
+        result = self._rolling(values).shift(1)
+        self._window.clear()
+        for v in values.to_numpy()[-self._period:]:
+            self._window.append(float(v))
+        return result.rename(self._name)
+
+    def update(self, bar: BarData) -> float | None:
+        value = self._extreme(self._window) if len(self._window) == self._period else None
+        self._window.append(float(getattr(bar, self._field)))
+        return value
+
+    def reset(self) -> None:
+        self._window.clear()
+
+
+class DonchianHighIndicator(_DonchianBase):
+    """Highest high of the previous N bars (DCH_N)."""
+    _field = "high"
+    _prefix = "DCH"
+
+    def _extreme(self, values) -> float:
+        return max(values)
+
+    def _rolling(self, series: pd.Series) -> pd.Series:
+        return series.rolling(self._period).max()
+
+
+class DonchianLowIndicator(_DonchianBase):
+    """Lowest low of the previous N bars (DCL_N)."""
+    _field = "low"
+    _prefix = "DCL"
+
+    def _extreme(self, values) -> float:
+        return min(values)
+
+    def _rolling(self, series: pd.Series) -> pd.Series:
+        return series.rolling(self._period).min()
+
+
+# ---------------------------------------------------------------------------
 # IndicatorEngine — manages multiple indicators
 # ---------------------------------------------------------------------------
 

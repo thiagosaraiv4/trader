@@ -50,9 +50,9 @@ from decimal import Decimal
 
 import pandas as pd
 
-from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
-from core.indicators import EMAIndicator, IndicatorEngine, SMAIndicator, ATRIndicator
+from core.algo_trading import AlgoEngine
 from core.paper_trading import OrderRequest, PaperTradingCore
+from core.strategy_factory import build_indicator_engine, create_strategy
 from core.strategy_params import StrategyParams
 from core.types import BarData
 from utils.logger import get_logger
@@ -571,11 +571,7 @@ class BacktestEngine:
         sim_clock = _SimulatedClock()
 
         # Same indicator engine as production
-        indicator_engine = IndicatorEngine()
-        indicator_engine.register(ATRIndicator(period=14))
-        indicator_engine.register(SMAIndicator(period=200))
-        indicator_engine.register(SMAIndicator(period=20))
-        indicator_engine.register(EMAIndicator(period=9))
+        indicator_engine = build_indicator_engine(self._params)
 
         # Same paper trading engine as production
         paper_engine = PaperTradingCore(
@@ -710,9 +706,7 @@ class BacktestEngine:
                     params=self._params,
                     circuit_breaker=self._circuit_breaker,
                 )
-                algo_engine.set_strategy(
-                    TrendFilteredMACrossStrategyV3(symbol=self._symbol, params=self._params)
-                )
+                algo_engine.set_strategy(create_strategy(self._symbol, self._params))
                 algo_engine.enable()
 
             # Set price reference in paper engine (live: last snapshot close)

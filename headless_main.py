@@ -32,15 +32,10 @@ from typing import Any, TextIO
 
 import pandas as pd
 
-from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
+from core.algo_trading import AlgoEngine
+from core.strategy_factory import build_indicator_engine, create_strategy
 from core.bar_log import BAR_LOG_PATH, append_bars, bars_from_dataframe, new_run_id
 from core.config import AppConfig
-from core.indicators import (
-    ATRIndicator,
-    EMAIndicator,
-    IndicatorEngine,
-    SMAIndicator,
-)
 from core.paper_trading import OrderRequest, PaperTradingCore, PositionSnapshot, TradeResult
 from core.session import SESSION_PATH, load_session, save_session
 from core.strategy_params import StrategyParams, load_params
@@ -150,11 +145,7 @@ class HeadlessTradingBot:
         )
 
         # -- Indicator Engine (warm-up via snapshot, then O(1) updates) ----
-        self._indicator_engine = IndicatorEngine()
-        self._indicator_engine.register(ATRIndicator(period=14))
-        self._indicator_engine.register(SMAIndicator(period=200))
-        self._indicator_engine.register(SMAIndicator(period=20))
-        self._indicator_engine.register(EMAIndicator(period=9))
+        self._indicator_engine = build_indicator_engine(self._params)
 
         # -- Paper Trading Core (no Qt) ------------------------------------
         self._core = PaperTradingCore(
@@ -183,10 +174,7 @@ class HeadlessTradingBot:
             initial_session_balance=start_equity,
             params=self._params,
         )
-        strategy = TrendFilteredMACrossStrategyV3(
-            symbol=str(cfg.default_symbol),
-            params=self._params,
-        )
+        strategy = create_strategy(str(cfg.default_symbol), self._params)
         self._algo_engine.set_strategy(strategy)
         self._algo_engine.enable()
 

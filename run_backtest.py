@@ -10,6 +10,7 @@ Uso:
     python run_backtest.py --start 2026-07-01 --end 2026-10-01
     python run_backtest.py --exchange bybit --timeframe 5m
     python run_backtest.py --optimize                  # procura parâmetros e valida
+    python run_backtest.py --strategy trend_v4 --optimize   # tendência (Donchian) em 4h, 4 anos
     python run_backtest.py --optimize --save           # ...e grava em strategy.json
 
 Usa os parâmetros de strategy.json (os mesmos do robô ao vivo), se existir.
@@ -42,25 +43,36 @@ from pathlib import Path
 
 from core.backtest_engine import BacktestEngine, BacktestResult, fetch_ohlcv_history
 from core.config import AppConfig
-from core.strategy_params import PARAMS_PATH, StrategyParams, load_params, save_params
+from core.strategy_params import PARAMS_PATH, STRATEGIES, StrategyParams, load_params, save_params
 from core.types import BarData
 from utils.logger import configure_logging
 
 _CACHE_DIR = Path(__file__).resolve().parent / "backtest_cache"
 _WARMUP_BARS = BacktestEngine._WARMUP_BARS
 
-# Parameter grid for --optimize: from the original (cautious) V3 values to
-# looser entries and roomier exits. (trail_activation_pct, trail_atr) pairs.
-_GRID: dict[str, list] = {
-    "atr_filter_min": [1.05, 0.9, 0.0],
-    "cross_lookback": [1, 3],
-    "exit_atr": [0.3, 0.6, 1.0],
-    "stop_atr": [1.5, 2.5],
-    "trail": [(0.003, 1.0), (0.006, 1.5)],
+# Parameter grids for --optimize. "trail" = (trail_activation_pct, trail_atr).
+_GRIDS: dict[str, dict[str, list]] = {
+    # From the original (cautious) V3 values to looser entries / roomier exits
+    "ma_cross_v3": {
+        "atr_filter_min": [1.05, 0.9, 0.0],
+        "cross_lookback": [1, 3],
+        "exit_atr": [0.3, 0.6, 1.0],
+        "stop_atr": [1.5, 2.5],
+        "trail": [(0.003, 1.0), (0.006, 1.5)],
+    },
+    # Faster/slower channels, with/without trend filter, tighter/looser stops
+    "trend_v4": {
+        "donchian_entry": [20, 40, 55],
+        "donchian_exit": [10, 20],
+        "trend_sma": [0, 100, 200],
+        "stop_atr": [2.0, 3.0],
+        "trail": [(0.0, 3.0), (0.0, 4.5)],
+    },
 }
-# Fewer trades than this is indistinguishable from luck
-_MIN_TRAIN_TRADES = 30
-_MIN_TEST_TRADES = 20
+_DEFAULT_DAYS = {"ma_cross_v3": 90, "trend_v4": 2190}
+# Fewer trades than this is indistinguishable from luck. Trend following on
+# 4h trades rarely by design, so it gets lower minimums and a longer history.
+_MIN_TRADES = {"ma_cross_v3": (30, 20), "trend_v4": (25, 12)}  # (train, validation)
 
 
 def _parse_date(value: str) -> datetime:
@@ -225,14 +237,15 @@ def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -
     print("=" * 60)
 
 
-def _grid() -> list[StrategyParams]:
-    """All combinations of _GRID applied on top of the defaults."""
+def _grid(base: StrategyParams) -> list[StrategyParams]:
+    """All combinations of the strategy's grid applied on top of `base`."""
+    grid = _GRIDS[base.strategy]
     combos = []
-    keys = list(_GRID)
-    for values in itertools.product(*(_GRID[k] for k in keys)):
+    keys = list(grid)
+    for values in itertools.product(*(grid[k] for k in keys)):
         d = dict(zip(keys, values))
         activation, trail_atr = d.pop("trail")
-        combos.append(StrategyParams(**d, trail_activation_pct=activation, trail_atr=trail_atr))
+        combos.append(replace(base, **d, trail_activation_pct=activation, trail_atr=trail_atr))
     return combos
 
 
@@ -260,8 +273,18 @@ def _evaluate(bars: list[BarData], params: StrategyParams, args: argparse.Namesp
 
 
 def _describe(p: StrategyParams) -> str:
+    if p.strategy == "trend_v4":
+        trend = f"SMA{p.trend_sma}" if p.trend_sma else "sem filtro"
+        return (f"entrada máx {p.donchian_entry:<2} saída mín {p.donchian_exit:<2} tendência {trend:<10} "
+                f"stop {p.stop_atr}ATR trail {p.trail_atr}ATR")
     return (f"atr≥{p.atr_filter_min:<4} cruz≤{p.cross_lookback} saída {p.exit_atr:<3}ATR "
             f"stop {p.stop_atr}ATR trail {p.trail_activation_pct:.1%}/{p.trail_atr}ATR")
+
+
+def _buy_hold(bars: list[BarData]) -> float:
+    """Return of buying at the first simulated open and holding to the end."""
+    sim = bars[_WARMUP_BARS:]
+    return float(sim[-1].close) / float(sim[0].open) - 1
 
 
 def _fmt(m: dict) -> str:
@@ -276,8 +299,7 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
     print(f"[*] Treino:    {train[_WARMUP_BARS].timestamp:%Y-%m-%d} → {train[-1].timestamp:%Y-%m-%d}")
     print(f"[*] Validação: {test[_WARMUP_BARS].timestamp:%Y-%m-%d} → {test[-1].timestamp:%Y-%m-%d}")
 
-    candidates = [replace(p, timeframe=current.timeframe, max_position_pct=current.max_position_pct)
-                  for p in _grid()]
+    candidates = _grid(current)
     # The engine warns about small samples on every run; the table already shows trade counts
     logging.getLogger().setLevel(logging.ERROR)
     print(f"[*] Testando {len(candidates)} combinações no treino...")
@@ -287,9 +309,10 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
         scored.append((p, _evaluate(train, p, args)))
     print()
 
-    eligible = [(p, m) for p, m in scored if m["trades"] >= _MIN_TRAIN_TRADES]
+    min_train, min_test = _MIN_TRADES[current.strategy]
+    eligible = [(p, m) for p, m in scored if m["trades"] >= min_train]
     if not eligible:
-        print(f"[!] Nenhuma combinação fez {_MIN_TRAIN_TRADES}+ trades no treino. Use um período maior (--days).")
+        print(f"[!] Nenhuma combinação fez {min_train}+ trades no treino. Use um período maior (--days).")
         return
     eligible.sort(key=lambda pm: pm[1]["net_ret"], reverse=True)
     top = eligible[:5]
@@ -298,6 +321,8 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
     print("  Atual vs. 5 melhores NO TREINO (líquido de taxas) e como foram na VALIDAÇÃO")
     print("=" * 100)
     base_train, base_test = _evaluate(train, current, args), _evaluate(test, current, args)
+    print(f"  COMPRAR E SEGURAR (referência, 100% do capital, sem taxas de giro)")
+    print(f"         treino: {_buy_hold(train):>+7.2%}{'':>31}| validação: {_buy_hold(test):>+7.2%}")
     print(f"  ATUAL  {_describe(current)}")
     print(f"         treino: {_fmt(base_train)} | validação: {_fmt(base_test)}")
     results = []
@@ -314,7 +339,7 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
     validated = (
         best_train["net_ret"] > 0
         and best_test["net_ret"] > 0
-        and best_test["trades"] >= _MIN_TEST_TRADES
+        and best_test["trades"] >= min_test
     )
     beats_current = best_test["net_ret"] > base_test["net_ret"]
     if validated and beats_current:
@@ -323,7 +348,12 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
         print("[~] A melhor do treino lucrou na validação, mas não superou a atual.")
     else:
         print(f"[✗] Não aprovada: precisa de lucro líquido no treino E na validação, "
-              f"com {_MIN_TEST_TRADES}+ trades na validação. Não use.")
+              f"com {min_test}+ trades na validação. Não use.")
+    hold_test = _buy_hold(test)
+    if best_test["net_ret"] > hold_test:
+        print(f"    Na validação a escolhida ({best_test['net_ret']:+.2%}) ganhou de comprar e segurar ({hold_test:+.2%}).")
+    else:
+        print(f"    Na validação a escolhida ({best_test['net_ret']:+.2%}) NÃO ganhou de comprar e segurar ({hold_test:+.2%}).")
     print("    (Circuit breaker de 7% desligado no otimizador; no robô ao vivo ele continua ativo.)")
     print("    Escolhida pelo treino; a validação é o número honesto. Escolher olhando a")
     print("    validação seria ajustar ao passado de novo.")
@@ -340,10 +370,12 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
 def main() -> None:
     cfg = AppConfig()
     parser = argparse.ArgumentParser(description="Backtest da Strategy V3 em dados recentes.")
-    parser.add_argument("--days", type=int, default=90, help="dias até --end (padrão: 90)")
+    parser.add_argument("--days", type=int, help="dias até --end (padrão: 90; 1460 na trend_v4)")
     parser.add_argument("--start", type=_parse_date, help="início AAAA-MM-DD (UTC); ignora --days")
     parser.add_argument("--end", type=_parse_date, help="fim AAAA-MM-DD (UTC, exclusivo); padrão: hoje 00:00")
     parser.add_argument("--timeframe", help="padrão: o de strategy.json (o do robô ao vivo)")
+    parser.add_argument("--strategy", choices=STRATEGIES,
+                        help="padrão: a de strategy.json; outra estratégia começa dos valores padrão dela")
     parser.add_argument("--symbol", default=str(cfg.default_symbol))
     parser.add_argument("--exchange", default="binance", help="id ccxt (padrão: binance)")
     parser.add_argument("--balance", type=float, default=10_000.0, help="capital inicial (padrão: 10000)")
@@ -355,6 +387,10 @@ def main() -> None:
     args = parser.parse_args()
 
     params = load_params()
+    if args.strategy and args.strategy != params.strategy:
+        params = StrategyParams.defaults_for(args.strategy)
+    if args.days is None:
+        args.days = _DEFAULT_DAYS[params.strategy]
     if args.timeframe:
         params = replace(params, timeframe=args.timeframe)
     args.timeframe = params.timeframe
@@ -382,7 +418,7 @@ def main() -> None:
     data_start = start - _WARMUP_BARS * tf  # indicators warm up before the tested period
 
     print("=" * 60)
-    print("BACKTEST — STRATEGY V3 (mesma do robô ao vivo)")
+    print(f"BACKTEST — {params.strategy} (mesmo pipeline do robô ao vivo)")
     print("=" * 60)
     print(f"[*] Parâmetros: {_describe(params)} | {params.timeframe}")
 
