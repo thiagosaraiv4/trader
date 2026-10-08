@@ -33,3 +33,4 @@ backtest_cache/
 
 # VM install (scripts/install_vm.sh)
 .venv/
+archive/

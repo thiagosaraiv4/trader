@@ -105,7 +105,9 @@ class PaperTradingCore:
         on_position_updated: Callable[[PositionSnapshot], None] | None = None,
         on_order_filled: Callable[[TradeResult], None] | None = None,
         on_trade_closed: Callable[[dict[str, Any]], None] | None = None,
+        trail_activation_pct: float = 0.003,
     ) -> None:
+        self._trail_activation_pct: float = trail_activation_pct
         self._balance: float = initial_balance
         self._initial_balance: float = initial_balance
         self._position: Position = Position()
@@ -265,7 +267,7 @@ class PaperTradingCore:
                     / self._position.entry_price
                 ) if self._position.entry_price > 0 else 0.0
 
-                if not self._position.trailing_active and pnl_pct >= 0.003:
+                if not self._position.trailing_active and pnl_pct >= self._trail_activation_pct:
                     self._position.trailing_active = True
                     self._last_exit_mechanism = "Trailing"
 

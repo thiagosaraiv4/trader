@@ -25,6 +25,7 @@ import os
 import signal
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TextIO
@@ -32,7 +33,7 @@ from typing import Any, TextIO
 import pandas as pd
 
 from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
-from core.bar_log import append_bars, bars_from_dataframe, new_run_id
+from core.bar_log import BAR_LOG_PATH, append_bars, bars_from_dataframe, new_run_id
 from core.config import AppConfig
 from core.indicators import (
     ATRIndicator,
@@ -41,8 +42,9 @@ from core.indicators import (
     SMAIndicator,
 )
 from core.paper_trading import OrderRequest, PaperTradingCore, PositionSnapshot, TradeResult
-from core.session import load_session, save_session
-from core.types import BarData, FeedConfig, FeedStateChange, ProviderID
+from core.session import SESSION_PATH, load_session, save_session
+from core.strategy_params import StrategyParams, load_params
+from core.types import BarData, FeedConfig, FeedStateChange, ProviderID, Timeframe
 from data.feed import DataFeedManager
 
 
@@ -111,7 +113,10 @@ class HeadlessTradingBot:
         6. Graceful shutdown on SIGINT / SIGTERM
     """
 
-    def __init__(self, cfg: AppConfig) -> None:
+    def __init__(self, cfg: AppConfig, params: StrategyParams | None = None) -> None:
+        # Strategy parameters (strategy.json) also choose the timeframe
+        self._params: StrategyParams = params or load_params()
+        cfg = replace(cfg, default_timeframe=Timeframe(self._params.timeframe))
         self._cfg = cfg
         self._running: bool = False
         self._feed: DataFeedManager | None = None
@@ -129,6 +134,20 @@ class HeadlessTradingBot:
         session = load_session(
             timeframe_seconds=cfg.default_timeframe.to_seconds()
         )
+        if session is not None and self._params_changed(session.meta):
+            # Different parameters = a different experiment: start a clean
+            # session so live results and run_comparison.py stay meaningful.
+            archive = _archive_run()
+            log.warning(
+                "strategy_params_changed — previous session archived, starting fresh",
+                extra={"component": "headless", "reason": str(archive)},
+            )
+            session = None
+
+        log.info(
+            "strategy_params",
+            extra={"component": "headless", "reason": json.dumps(self._params.to_dict())},
+        )
 
         # -- Indicator Engine (warm-up via snapshot, then O(1) updates) ----
         self._indicator_engine = IndicatorEngine()
@@ -144,6 +163,7 @@ class HeadlessTradingBot:
             on_position_updated=self._on_position_updated,
             on_order_filled=self._on_order_filled,
             on_trade_closed=self._on_trade_closed,
+            trail_activation_pct=self._params.trail_activation_pct,
         )
 
         # -- Algo Engine + Strategy ----------------------------------------
@@ -161,9 +181,11 @@ class HeadlessTradingBot:
             risk_pct=0.02,
             cooldown_sec=180.0,
             initial_session_balance=start_equity,
+            params=self._params,
         )
         strategy = TrendFilteredMACrossStrategyV3(
             symbol=str(cfg.default_symbol),
+            params=self._params,
         )
         self._algo_engine.set_strategy(strategy)
         self._algo_engine.enable()
@@ -194,6 +216,14 @@ class HeadlessTradingBot:
                 "trades": self._perf["trades"],
             },
         )
+
+    def _params_changed(self, meta: dict[str, Any]) -> bool:
+        """Did the saved session run with other strategy parameters?"""
+        stored = meta.get("strategy_params")
+        if stored is None:
+            # Sessions from before parameters were recorded used the defaults
+            return self._params != StrategyParams()
+        return StrategyParams.from_dict(stored) != self._params
 
     # -- Callbacks (Headless Adapter) --------------------------------------
 
@@ -406,6 +436,7 @@ class HeadlessTradingBot:
             balance=state["balance"],
             open_position=state["open_position"],
             trade_log=state["trade_log"],
+            meta={"strategy_params": self._params.to_dict()},
         )
         log.info(
             "session_saved",
@@ -524,6 +555,16 @@ async def run() -> None:
             signal.signal(sig, lambda s, f: bot.request_shutdown())
 
     await bot.run()
+
+
+def _archive_run() -> Path:
+    """Move session.json and live_bars.csv to archive/<UTC time>/."""
+    dest = Path(__file__).resolve().parent / "archive" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in (SESSION_PATH, BAR_LOG_PATH):
+        if path.exists():
+            path.replace(dest / path.name)
+    return dest
 
 
 def _acquire_instance_lock() -> TextIO | None:

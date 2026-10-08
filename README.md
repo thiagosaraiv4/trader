@@ -101,6 +101,23 @@ ficam em `backtest_cache/`.
 Não usa dados sintéticos: se o download falhar, o script para. A Binance e a Bybit bloqueiam
 servidores nos EUA (caso do Codespaces) — **rode do seu computador** (do Brasil a Binance funciona).
 
+### Ajustar a estratégia (menos "medroso") com validação
+
+Os números da estratégia (filtro de volatilidade na entrada, janela do cruzamento, saída por
+momentum, stop, trailing, tamanho da posição, timeframe) ficam em `strategy.json`, lido pelo robô
+ao vivo, pelo backtest e pela comparação. Sem o arquivo, valem os valores originais da V3.
+
+```bash
+python run_backtest.py --optimize --save
+```
+
+Testa 72 combinações — das originais até entradas mais soltas e saídas mais folgadas — nos
+primeiros 2/3 do período (treino) e confere a melhor nos últimos 1/3 (validação, que ela nunca viu).
+Só grava em `strategy.json` se a melhor também der lucro **líquido de taxas** na validação e superar
+a atual. Para o robô passar a usar: `sudo systemctl restart trading-bot`. Ao ver parâmetros novos,
+ele arquiva a sessão anterior em `archive/` e começa do zero, para a validação ao vivo não misturar
+configurações.
+
 ### Rodar comparação Live vs Backtest
 
 ```bash

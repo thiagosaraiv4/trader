@@ -9,6 +9,14 @@ Uso:
     python run_backtest.py --days 30
     python run_backtest.py --start 2026-07-01 --end 2026-10-01
     python run_backtest.py --exchange bybit --timeframe 5m
+    python run_backtest.py --optimize                  # procura parâmetros e valida
+    python run_backtest.py --optimize --save           # ...e grava em strategy.json
+
+Usa os parâmetros de strategy.json (os mesmos do robô ao vivo), se existir.
+
+--optimize testa combinações de parâmetros nos primeiros 2/3 do período
+(treino) e confere a melhor nos últimos 1/3, que ela nunca viu (validação).
+Só o resultado da validação diz algo sobre o futuro.
 
 Datas em UTC. Sem --end, o período termina hoje às 00:00 UTC (assim rodar de
 novo no mesmo dia reaproveita o cache em backtest_cache/).
@@ -23,20 +31,35 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import logging
 import sys
 import time
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from core.backtest_engine import BacktestEngine, BacktestResult, fetch_ohlcv_history
 from core.config import AppConfig
+from core.strategy_params import PARAMS_PATH, StrategyParams, load_params, save_params
 from core.types import BarData
 from utils.logger import configure_logging
 
 _CACHE_DIR = Path(__file__).resolve().parent / "backtest_cache"
 _WARMUP_BARS = BacktestEngine._WARMUP_BARS
+
+# Parameter grid for --optimize: from the original (cautious) V3 values to
+# looser entries and roomier exits. (trail_activation_pct, trail_atr) pairs.
+_GRID: dict[str, list] = {
+    "atr_filter_min": [1.05, 0.9, 0.0],
+    "cross_lookback": [1, 3],
+    "exit_atr": [0.3, 0.6, 1.0],
+    "stop_atr": [1.5, 2.5],
+    "trail": [(0.003, 1.0), (0.006, 1.5)],
+}
+_MIN_TRAIN_TRADES = 10
+_MIN_TEST_TRADES = 5
 
 
 def _parse_date(value: str) -> datetime:
@@ -201,18 +224,125 @@ def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -
     print("=" * 60)
 
 
+def _grid() -> list[StrategyParams]:
+    """All combinations of _GRID applied on top of the defaults."""
+    combos = []
+    keys = list(_GRID)
+    for values in itertools.product(*(_GRID[k] for k in keys)):
+        d = dict(zip(keys, values))
+        activation, trail_atr = d.pop("trail")
+        combos.append(StrategyParams(**d, trail_activation_pct=activation, trail_atr=trail_atr))
+    return combos
+
+
+def _evaluate(bars: list[BarData], params: StrategyParams, args: argparse.Namespace) -> dict:
+    """Backtest one parameter set; metrics are net of fees."""
+    result = BacktestEngine(
+        symbol=args.symbol,
+        timeframe=params.timeframe,
+        initial_balance=args.balance,
+        bars=bars,
+        params=params,
+    ).run()
+    pnls = _net_pnls(result, args.balance)
+    return {
+        "trades": len(pnls),
+        "net_ret": (result.final_balance - args.balance) / args.balance,
+        "win": (sum(1 for p in pnls if p > 0) / len(pnls)) if pnls else 0.0,
+        "dd": result.max_drawdown,
+    }
+
+
+def _describe(p: StrategyParams) -> str:
+    return (f"atr≥{p.atr_filter_min:<4} cruz≤{p.cross_lookback} saída {p.exit_atr:<3}ATR "
+            f"stop {p.stop_atr}ATR trail {p.trail_activation_pct:.1%}/{p.trail_atr}ATR")
+
+
+def _fmt(m: dict) -> str:
+    return f"{m['trades']:>4} trades {m['net_ret']:>+7.2%} win {m['win']:>4.0%} dd {m['dd']:>5.2%}"
+
+
+def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Namespace) -> None:
+    sim = len(bars) - _WARMUP_BARS
+    cut = _WARMUP_BARS + (sim * 2) // 3
+    train = bars[:cut]
+    test = bars[cut - _WARMUP_BARS:]  # test keeps its own warm-up bars
+    print(f"[*] Treino:    {train[_WARMUP_BARS].timestamp:%Y-%m-%d} → {train[-1].timestamp:%Y-%m-%d}")
+    print(f"[*] Validação: {test[_WARMUP_BARS].timestamp:%Y-%m-%d} → {test[-1].timestamp:%Y-%m-%d}")
+
+    candidates = [replace(p, timeframe=current.timeframe, max_position_pct=current.max_position_pct)
+                  for p in _grid()]
+    print(f"[*] Testando {len(candidates)} combinações no treino...")
+    scored = []
+    for i, p in enumerate(candidates, 1):
+        print(f"\r    {i}/{len(candidates)}", end="", flush=True)
+        scored.append((p, _evaluate(train, p, args)))
+    print()
+
+    eligible = [(p, m) for p, m in scored if m["trades"] >= _MIN_TRAIN_TRADES]
+    if not eligible:
+        print(f"[!] Nenhuma combinação fez {_MIN_TRAIN_TRADES}+ trades no treino. Use um período maior.")
+        return
+    eligible.sort(key=lambda pm: pm[1]["net_ret"], reverse=True)
+    top = eligible[:5]
+
+    print("\n" + "=" * 100)
+    print("  Atual vs. 5 melhores NO TREINO (líquido de taxas) e como foram na VALIDAÇÃO")
+    print("=" * 100)
+    base_train, base_test = _evaluate(train, current, args), _evaluate(test, current, args)
+    print(f"  ATUAL  {_describe(current)}")
+    print(f"         treino: {_fmt(base_train)} | validação: {_fmt(base_test)}")
+    results = []
+    for rank, (p, m_train) in enumerate(top, 1):
+        m_test = _evaluate(test, p, args)
+        results.append((p, m_train, m_test))
+        print(f"  #{rank}     {_describe(p)}")
+        print(f"         treino: {_fmt(m_train)} | validação: {_fmt(m_test)}")
+    print("=" * 100)
+
+    best, _, best_test = results[0]
+    validated = best_test["net_ret"] > 0 and best_test["trades"] >= _MIN_TEST_TRADES
+    beats_current = best_test["net_ret"] > base_test["net_ret"]
+    if validated and beats_current:
+        print("[✓] A melhor do treino também lucrou na validação e superou a atual.")
+    elif validated:
+        print("[~] A melhor do treino lucrou na validação, mas não superou a atual.")
+    else:
+        print(f"[✗] A melhor do treino NÃO se confirmou na validação "
+              f"(precisa de lucro líquido e {_MIN_TEST_TRADES}+ trades). Não use.")
+    print("    Escolhida pelo treino; a validação é o número honesto. Escolher olhando a")
+    print("    validação seria ajustar ao passado de novo.")
+
+    if args.save:
+        if validated and beats_current:
+            save_params(best)
+            print(f"[*] Gravado em {PARAMS_PATH.name}. No servidor: sudo systemctl restart trading-bot")
+            print("    (o robô arquiva a sessão antiga e começa uma nova com esses parâmetros)")
+        else:
+            print(f"[*] --save ignorado: {PARAMS_PATH.name} não foi alterado.")
+
+
 def main() -> None:
     cfg = AppConfig()
     parser = argparse.ArgumentParser(description="Backtest da Strategy V3 em dados recentes.")
     parser.add_argument("--days", type=int, default=90, help="dias até --end (padrão: 90)")
     parser.add_argument("--start", type=_parse_date, help="início AAAA-MM-DD (UTC); ignora --days")
     parser.add_argument("--end", type=_parse_date, help="fim AAAA-MM-DD (UTC, exclusivo); padrão: hoje 00:00")
-    parser.add_argument("--timeframe", default=cfg.default_timeframe.value, help="padrão: o do robô ao vivo")
+    parser.add_argument("--timeframe", help="padrão: o de strategy.json (o do robô ao vivo)")
     parser.add_argument("--symbol", default=str(cfg.default_symbol))
     parser.add_argument("--exchange", default="binance", help="id ccxt (padrão: binance)")
     parser.add_argument("--balance", type=float, default=10_000.0, help="capital inicial (padrão: 10000)")
     parser.add_argument("--no-cache", action="store_true", help="baixa de novo mesmo com cache")
+    parser.add_argument("--optimize", action="store_true",
+                        help="testa combinações no treino (2/3) e valida no resto (1/3)")
+    parser.add_argument("--save", action="store_true",
+                        help="com --optimize: grava a melhor em strategy.json se ela se validar")
     args = parser.parse_args()
+
+    params = load_params()
+    if args.timeframe:
+        params = replace(params, timeframe=args.timeframe)
+    args.timeframe = params.timeframe
 
     # Only warnings from the engine (it logs every signal at INFO)
     configure_logging(level=logging.WARNING)
@@ -239,6 +369,7 @@ def main() -> None:
     print("=" * 60)
     print("BACKTEST — STRATEGY V3 (mesma do robô ao vivo)")
     print("=" * 60)
+    print(f"[*] Parâmetros: {_describe(params)} | {params.timeframe}")
 
     bars = _load_bars(args, data_start, end, tf)
     if len(bars) < _WARMUP_BARS + 10:
@@ -248,12 +379,17 @@ def main() -> None:
     if gaps:
         print(f"[i] {gaps}")
 
+    if args.optimize:
+        _optimize(bars, params, args)
+        return
+
     print("[*] Simulando...")
     engine = BacktestEngine(
         symbol=args.symbol,
         timeframe=args.timeframe,
         initial_balance=args.balance,
         bars=bars,
+        params=params,
     )
     result = engine.run()
     result.data_source = f"ccxt/{args.exchange}"

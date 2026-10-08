@@ -48,6 +48,7 @@ import time
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
+from core.strategy_params import StrategyParams
 from core.paper_trading import OrderRequest, Position
 from utils.logger import get_logger
 
@@ -374,10 +375,14 @@ class TrendFilteredMACrossStrategyV3:
     """
     Trend Filtered MA Cross Strategy V3.
     Purely Declarative. Returns `LONG`, `FLAT` or `NONE`.
+    Thresholds come from StrategyParams (defaults = original V3).
     """
-    def __init__(self, symbol: str = "BTC/USDT") -> None:
+    def __init__(self, symbol: str = "BTC/USDT", params: StrategyParams | None = None) -> None:
         self._symbol: str = symbol
+        self._params: StrategyParams = params or StrategyParams()
         self._log = get_logger(__name__, component="trend_filtered_ma_strategy_v3")
+        # Closed bars since EMA9 last crossed above SMA20 (None = no cross yet)
+        self._bars_since_cross: int | None = None
         
         self._ema_9_prev: float | None = None
         self._sma_20_prev: float | None = None
@@ -424,6 +429,16 @@ class TrendFilteredMACrossStrategyV3:
         if ema_9_prev is None or sma_20_prev is None:
             return "NONE"
 
+        p = self._params
+
+        # Track the most recent bullish cross while EMA9 stays above SMA20
+        if ema_9_prev <= sma_20_prev and ema_9 > sma_20:
+            self._bars_since_cross = 0
+        elif ema_9 > sma_20 and self._bars_since_cross is not None:
+            self._bars_since_cross += 1
+        else:
+            self._bars_since_cross = None
+
         has_position = (
             current_position is not None
             and current_position.side != "FLAT"
@@ -431,15 +446,24 @@ class TrendFilteredMACrossStrategyV3:
         )
 
         if has_position:
-            if sma_20 - ema_9 > 0.3 * atr:
+            if sma_20 - ema_9 > p.exit_atr * atr:
                 self._log.info("📉 Bearish crossover — momentum loss", extra={"price": current_price})
                 return "FLAT"
             return "NONE"
 
-        if ema_9_prev <= sma_20_prev and ema_9 > sma_20:
-            if current_price > sma_200:
-                if len(self._atr_window) >= 14 and (atr_mean * 1.05 < atr < atr_mean * 3.0):
+        recent_cross = (
+            self._bars_since_cross is not None
+            and self._bars_since_cross < max(1, p.cross_lookback)
+        )
+        if recent_cross:
+            if not p.trend_filter or current_price > sma_200:
+                atr_ok = atr < atr_mean * p.atr_filter_max and (
+                    p.atr_filter_min <= 0 or atr > atr_mean * p.atr_filter_min
+                )
+                if len(self._atr_window) >= 14 and atr_ok:
                     self._log.info("📈 Verified Bullish Entry", extra={"price": current_price, "atr": atr})
+                    # One entry per cross
+                    self._bars_since_cross = None
                     return "LONG"
 
         return "NONE"
@@ -599,7 +623,9 @@ class AlgoEngine:
         cooldown_sec: float = 180.0,
         initial_session_balance: float = 10_000.0,
         on_circuit_breaker: Callable[[str], None] | None = None,
+        params: StrategyParams | None = None,
     ) -> None:
+        self._params: StrategyParams = params or StrategyParams()
         self._strategy: IStrategy | None = None
         self._risk_manager: RiskManager = RiskManager(max_risk_per_trade_pct=risk_pct)
         self._enabled: bool = False
@@ -740,10 +766,15 @@ class AlgoEngine:
                 if atr is None:
                     return None
                     
-                stop_price = price - (1.5 * atr)
-                trail_distance_abs = max(1.0 * atr, price * 0.005)
+                p = self._params
+                stop_price = price - (p.stop_atr * atr)
+                trail_distance_abs = max(p.trail_atr * atr, price * p.trail_min_pct)
                 
-                final_qty = self._risk_manager.size_order(balance, price, stop_price, fallback_realistic_stop=True)
+                final_qty = self._risk_manager.size_order(
+                    balance, price, stop_price,
+                    max_position_pct=p.max_position_pct,
+                    fallback_realistic_stop=True,
+                )
                 if final_qty <= 0:
                     self._log.info("Order REJECTED by risk manager (size <= 0)")
                     return None

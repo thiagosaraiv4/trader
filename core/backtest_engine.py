@@ -53,6 +53,7 @@ import pandas as pd
 from core.algo_trading import AlgoEngine, TrendFilteredMACrossStrategyV3
 from core.indicators import EMAIndicator, IndicatorEngine, SMAIndicator, ATRIndicator
 from core.paper_trading import OrderRequest, PaperTradingCore
+from core.strategy_params import StrategyParams
 from core.types import BarData
 from utils.logger import get_logger
 
@@ -432,6 +433,7 @@ class BacktestEngine:
         bars: list[BarData] | None = None,
         warmup_bars: int | None = None,
         segments: list[ReplaySegment] | None = None,
+        params: StrategyParams | None = None,
     ) -> None:
         """
         Args:
@@ -441,7 +443,9 @@ class BacktestEngine:
                 (default _WARMUP_BARS). The simulation starts after them.
             segments: Replay of a live run recorded by the bot
                 (core/bar_log.load_segments). Takes precedence over bars.
+            params: Strategy/exit parameters (default: StrategyParams()).
         """
+        self._params = params or StrategyParams()
         self._symbol = symbol
         self._timeframe = timeframe
         self._start_date = start_date or datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -572,7 +576,10 @@ class BacktestEngine:
         indicator_engine.register(EMAIndicator(period=9))
 
         # Same paper trading engine as production
-        paper_engine = PaperTradingCore(initial_balance=self._initial_balance)
+        paper_engine = PaperTradingCore(
+            initial_balance=self._initial_balance,
+            trail_activation_pct=self._params.trail_activation_pct,
+        )
         algo_engine: AlgoEngine | None = None
 
         # --- Simulation state ---
@@ -698,8 +705,11 @@ class BacktestEngine:
                     risk_pct=self._risk_pct,
                     cooldown_sec=self._cooldown_sec,
                     initial_session_balance=start_equity,
+                    params=self._params,
                 )
-                algo_engine.set_strategy(TrendFilteredMACrossStrategyV3(symbol=self._symbol))
+                algo_engine.set_strategy(
+                    TrendFilteredMACrossStrategyV3(symbol=self._symbol, params=self._params)
+                )
                 algo_engine.enable()
 
             # Set price reference in paper engine (live: last snapshot close)

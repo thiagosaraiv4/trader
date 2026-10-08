@@ -24,7 +24,7 @@ from utils.logger import get_logger
 _log = get_logger(__name__, component="session")
 
 # Session file lives next to the application root
-_SESSION_PATH = Path(__file__).resolve().parent.parent / "session.json"
+SESSION_PATH = Path(__file__).resolve().parent.parent / "session.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +34,14 @@ class SessionState:
     position: dict[str, Any] | None
     trade_log: list[dict[str, Any]] = field(default_factory=list)
     stale_position: bool = False
+    meta: dict[str, Any] = field(default_factory=dict)  # e.g. strategy_params
 
 
 def save_session(
     balance: float,
     open_position: dict[str, Any] | None,
     trade_log: list[dict[str, Any]] | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> None:
     """
     Persist the current PaperTradingEngine state to disk.
@@ -48,21 +50,23 @@ def save_session(
         balance: Current cash balance.
         open_position: Serialized position dict, or None if flat.
         trade_log: List of serialized trade records.
+        meta: Extra info about the run (e.g. strategy parameters).
     """
     payload = {
         "balance": balance,
         "open_position": open_position,
         "trade_log": trade_log or [],
+        "meta": meta or {},
     }
     try:
         # Atomic write: write to temp file, then rename.
         # Prevents corruption if process dies mid-write (Codespace shutdown).
-        tmp_path = _SESSION_PATH.with_suffix(".tmp")
+        tmp_path = SESSION_PATH.with_suffix(".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
             f.flush()
-        tmp_path.replace(_SESSION_PATH)
-        _log.info("Session saved", extra={"path": str(_SESSION_PATH)})
+        tmp_path.replace(SESSION_PATH)
+        _log.info("Session saved", extra={"path": str(SESSION_PATH)})
     except (OSError, TypeError) as e:
         _log.error(f"Failed to save session: {e}")
 
@@ -75,17 +79,18 @@ def load_session(timeframe_seconds: int = 60) -> SessionState | None:
         SessionState if file exists and is valid, None otherwise.
         Never raises — logs warning on any error.
     """
-    if not _SESSION_PATH.exists():
+    if not SESSION_PATH.exists():
         _log.info("No session file found — starting fresh")
         return None
 
     try:
-        with open(_SESSION_PATH, "r", encoding="utf-8") as f:
+        with open(SESSION_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         balance = float(data["balance"])
         position = data.get("open_position")
         trade_log = data.get("trade_log", [])
+        meta = data.get("meta") or {}
 
         stale_position = False
         if position is not None and position.get("side") != "FLAT":
@@ -114,6 +119,7 @@ def load_session(timeframe_seconds: int = 60) -> SessionState | None:
             position=position,
             trade_log=trade_log,
             stale_position=stale_position,
+            meta=meta,
         )
 
     except json.JSONDecodeError as e:

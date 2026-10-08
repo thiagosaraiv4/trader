@@ -26,6 +26,8 @@ from core.backtest_engine import BacktestEngine, BacktestResult
 from core.bar_log import BAR_LOG_PATH, load_segments
 from core.config import AppConfig
 from core.session import load_session
+from core.strategy_params import StrategyParams, load_params
+from core.types import Timeframe
 
 _INITIAL_BALANCE = 10_000.0
 # Bars the strategy needs before it can signal (ATR window of 14 + previous EMA/SMA)
@@ -111,13 +113,19 @@ def compare_live_with_backtest() -> None:
     print("============================================================")
 
     cfg = AppConfig()
-    tf = timedelta(seconds=cfg.default_timeframe.to_seconds())
 
     # Load Real Session
     session = load_session()
     if not session or not session.trade_log:
         print("[!] Nenhuma sessao ao vivo com log gravado. Abortando.")
         return
+
+    # Same parameters the live session ran with
+    stored = session.meta.get("strategy_params")
+    params = StrategyParams.from_dict(stored) if stored else load_params()
+    timeframe = Timeframe(params.timeframe)
+    tf = timedelta(seconds=timeframe.to_seconds())
+    print(f"[*] Parâmetros: {params.to_dict()}")
 
     segments = load_segments()
     bt_min_entry: datetime | None = None
@@ -135,7 +143,8 @@ def compare_live_with_backtest() -> None:
         )
         engine = BacktestEngine(
             symbol=str(cfg.default_symbol),
-            timeframe=cfg.default_timeframe.value,
+            timeframe=timeframe.value,
+            params=params,
             initial_balance=_INITIAL_BALANCE,
             segments=segments,
         )
@@ -153,7 +162,8 @@ def compare_live_with_backtest() -> None:
         print(f"[*] {BAR_LOG_PATH.name} ausente — baixando histórico via ccxt")
         engine = BacktestEngine(
             symbol=str(cfg.default_symbol),
-            timeframe=cfg.default_timeframe.value,
+            timeframe=timeframe.value,
+            params=params,
             initial_balance=_INITIAL_BALANCE,
             start_date=first_bar - _STRATEGY_WARMUP_BARS * tf,
             end_date=window_end,
