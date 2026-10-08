@@ -77,12 +77,44 @@ def _write_cache(path: Path, bars: list[BarData]) -> None:
     tmp.replace(path)
 
 
-def _load_bars(args: argparse.Namespace, data_start: datetime, end: datetime) -> list[BarData]:
-    """Cached download. Exits with an explanation if the exchange is unreachable."""
+def _coverage_problem(bars: list[BarData], data_start: datetime, end: datetime, tf: timedelta) -> str | None:
+    """Why the bars don't cover [data_start, end), or None if they do."""
+    if not bars:
+        return "nenhum candle recebido"
+    tolerance = 5 * tf
+    if bars[0].timestamp > data_start + tolerance or bars[-1].timestamp < end - tf - tolerance:
+        return (f"recebidos só {bars[0].timestamp:%Y-%m-%d %H:%M} → "
+                f"{bars[-1].timestamp:%Y-%m-%d %H:%M} UTC")
+    return None
+
+
+def _gap_summary(bars: list[BarData], tf: timedelta) -> str | None:
+    """Missing candles inside the range (exchange maintenance etc.), if any."""
+    missing = 0
+    largest = timedelta(0)
+    for prev, cur in zip(bars, bars[1:]):
+        gap = cur.timestamp - prev.timestamp
+        if gap > tf:
+            missing += int(gap / tf) - 1
+            largest = max(largest, gap - tf)
+    if not missing:
+        return None
+    return f"{missing:,} candles faltando no período (maior buraco: {largest})"
+
+
+def _load_bars(args: argparse.Namespace, data_start: datetime, end: datetime, tf: timedelta) -> list[BarData]:
+    """
+    Cached download of [data_start, end). Exits with an explanation if the
+    exchange is unreachable or does not have the whole period. Only complete
+    downloads are cached.
+    """
     path = _cache_path(args.exchange, args.symbol, args.timeframe, data_start, end)
     if path.exists() and not args.no_cache:
-        print(f"[*] Usando cache: {path.name}")
-        return _read_cache(path)
+        bars = _read_cache(path)
+        if _coverage_problem(bars, data_start, end, tf) is None:
+            print(f"[*] Usando cache: {path.name}")
+            return bars
+        print(f"[*] Cache incompleto ({path.name}) — baixando de novo")
 
     print(f"[*] Baixando {args.symbol} {args.timeframe} da {args.exchange} "
           f"({data_start:%Y-%m-%d %H:%M} → {end:%Y-%m-%d %H:%M} UTC)...")
@@ -99,9 +131,26 @@ def _load_bars(args: argparse.Namespace, data_start: datetime, end: datetime) ->
         sys.exit(1)
     print(f"\r    {len(bars):,} candles em {time.monotonic() - started:.0f}s")
 
-    if bars:
-        _write_cache(path, bars)
+    problem = _coverage_problem(bars, data_start, end, tf)
+    if problem is not None:
+        print(f"[!] A {args.exchange} não tem o período inteiro: {problem}.")
+        print("    Algumas exchanges (ex.: Kraken) só servem as últimas horas em 1m.")
+        print("    Use outra exchange ou um --start/--end dentro do que ela tem.")
+        sys.exit(1)
+
+    _write_cache(path, bars)
     return bars
+
+
+def _net_pnls(result: BacktestResult, initial: float) -> list[float]:
+    """Per-trade PnL after fees: each trade starts and ends flat, so the
+    change in cash between consecutive closes is exactly its net result."""
+    pnls: list[float] = []
+    prev = initial
+    for t in result.trade_log:
+        pnls.append(t.balance_after - prev)
+        prev = t.balance_after
+    return pnls
 
 
 def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -> None:
@@ -112,6 +161,9 @@ def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -
     net = result.final_balance - initial
     fees = gross - net
     buy_hold = float(sim_bars[-1].close) / float(sim_bars[0].open) - 1
+    net_pnls = _net_pnls(result, initial)
+    net_wins = [p for p in net_pnls if p > 0]
+    net_losses = [p for p in net_pnls if p < 0]
 
     print(f"  Período:         {sim_bars[0].timestamp:%Y-%m-%d %H:%M} → "
           f"{sim_bars[-1].timestamp:%Y-%m-%d %H:%M} UTC ({len(sim_bars):,} candles)")
@@ -119,6 +171,10 @@ def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -
     print(f"  Taxas pagas:     ${fees:,.2f} ({fees / initial:.2%} do capital"
           + (f", ${fees / result.total_trades:,.2f}/trade)" if result.total_trades else ")"))
     print(f"  PnL líquido:     ${net:,.2f} ({net / initial:.2%})")
+    if net_pnls:
+        net_pf = (sum(net_wins) / abs(sum(net_losses))) if net_losses else float("inf")
+        print(f"  Win rate líq.:   {len(net_wins) / len(net_pnls):.1%} (após taxas; o Win Rate acima é bruto)")
+        print(f"  Profit factor líq.: {net_pf:.2f}")
     print(f"  Buy & hold BTC:  {buy_hold:.2%} no mesmo período")
     print("=" * 60)
 
@@ -127,18 +183,19 @@ def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -
 
     # Per-month breakdown: consistency matters more than the total
     by_month: dict[str, list] = defaultdict(list)
-    for t in result.trade_log:
-        by_month[f"{t.exit_time:%Y-%m}"].append(t)
+    for t, net_pnl in zip(result.trade_log, net_pnls):
+        by_month[f"{t.exit_time:%Y-%m}"].append((t, net_pnl))
 
-    print(f"  {'Mês':<8} {'Trades':>6} {'Win%':>6} {'PnL bruto':>11} {'Líquido':>9}")
+    print(f"  {'Mês':<8} {'Trades':>6} {'Win%líq':>7} {'PnL bruto':>11} {'Líquido':>9}")
     prev_balance = initial
     for month in sorted(by_month):
-        trades = by_month[month]
-        wins = sum(1 for t in trades if t.profit > 0)
+        entries = by_month[month]
+        trades = [t for t, _ in entries]
+        wins = sum(1 for _, net_pnl in entries if net_pnl > 0)
         month_gross = sum(t.profit for t in trades)
         end_balance = trades[-1].balance_after
         month_net = (end_balance - prev_balance) / prev_balance if prev_balance else 0.0
-        print(f"  {month:<8} {len(trades):>6} {wins / len(trades):>6.0%} "
+        print(f"  {month:<8} {len(trades):>6} {wins / len(trades):>7.0%} "
               f"{month_gross:>11,.2f} {month_net:>9.2%}")
         prev_balance = end_balance
     print("=" * 60)
@@ -160,23 +217,36 @@ def main() -> None:
     # Only warnings from the engine (it logs every signal at INFO)
     configure_logging(level=logging.WARNING)
 
-    end = args.end or datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    probe = BacktestEngine(timeframe=args.timeframe)
+    tf = timedelta(minutes=probe._timeframe_to_minutes())
+
+    now = datetime.now(timezone.utc)
+    end = args.end or now.replace(hour=0, minute=0, second=0, microsecond=0)
     start = args.start or end - timedelta(days=args.days)
     if start >= end:
         parser.error("o início precisa ser antes do fim")
-
-    probe = BacktestEngine(timeframe=args.timeframe)
-    tf = timedelta(minutes=probe._timeframe_to_minutes())
+    # An --end in the future stops at the last closed candle (also in the cache key)
+    last_close = datetime.fromtimestamp(
+        int(now.timestamp()) // int(tf.total_seconds()) * int(tf.total_seconds()), tz=timezone.utc,
+    )
+    if end > last_close:
+        end = last_close
+        print(f"[i] --end no futuro: usando até {end:%Y-%m-%d %H:%M} UTC")
+        if start >= end:
+            parser.error("o início está no futuro")
     data_start = start - _WARMUP_BARS * tf  # indicators warm up before the tested period
 
     print("=" * 60)
     print("BACKTEST — STRATEGY V3 (mesma do robô ao vivo)")
     print("=" * 60)
 
-    bars = _load_bars(args, data_start, end)
+    bars = _load_bars(args, data_start, end, tf)
     if len(bars) < _WARMUP_BARS + 10:
         print(f"[!] Dados insuficientes: {len(bars)} candles (mínimo {_WARMUP_BARS + 10}).")
         sys.exit(1)
+    gaps = _gap_summary(bars, tf)
+    if gaps:
+        print(f"[i] {gaps}")
 
     print("[*] Simulando...")
     engine = BacktestEngine(

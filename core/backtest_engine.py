@@ -284,14 +284,21 @@ def fetch_ohlcv_history(
 
         rows: dict[int, list] = {}
         current_ms = since_ms
+        span_ms = 1000 * tf_ms  # window an empty page covers; adapted to the real page size
         while current_ms < until_ms:
-            page = exchange.fetch_ohlcv(symbol, timeframe, since=current_ms, limit=1000)
-            page = [r for r in page if since_ms <= r[0] < until_ms]
-            if not page:
-                break
-            for r in page:
-                rows[int(r[0])] = r
-            next_ms = max(int(r[0]) for r in page) + tf_ms
+            raw = exchange.fetch_ohlcv(symbol, timeframe, since=current_ms, limit=1000)
+            page = [r for r in raw if since_ms <= r[0] < until_ms]
+            if page:
+                for r in page:
+                    rows[int(r[0])] = r
+                span_ms = len(raw) * tf_ms
+                next_ms = max(int(r[0]) for r in page) + tf_ms
+            elif raw and min(int(r[0]) for r in raw) >= until_ms:
+                break  # past the requested end
+            else:
+                # Empty window: a gap in the exchange's data (or before the
+                # pair existed) — skip ahead instead of stopping
+                next_ms = current_ms + span_ms
             if next_ms <= current_ms:
                 break  # no progress — avoid looping forever
             current_ms = next_ms
@@ -873,8 +880,11 @@ class BacktestEngine:
                 daily_returns.append(profit / self._initial_balance)
                 curr += timedelta(days=1)
                 
-            months = days_total / 30.44 if days_total > 0 else 0.01
-            trades_per_month_avg = total / months
+            # Rate over the simulated period — not first→last trade date,
+            # which is 0 days when all trades fall on the same day
+            sim_minutes = (len(equity_curve) - 1) * self._timeframe_to_minutes()
+            months = sim_minutes / (30.44 * 1440)
+            trades_per_month_avg = total / months if months > 0 else 0.0
         else:
             days_total = 0
             trades_per_month_avg = 0.0
