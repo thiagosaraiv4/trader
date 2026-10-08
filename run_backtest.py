@@ -287,6 +287,16 @@ def _buy_hold(bars: list[BarData]) -> float:
     return float(sim[-1].close) / float(sim[0].open) - 1
 
 
+def _buy_hold_dd(bars: list[BarData]) -> float:
+    """Worst peak-to-trough fall (on closes) while holding."""
+    peak, worst = 0.0, 0.0
+    for b in bars[_WARMUP_BARS:]:
+        c = float(b.close)
+        peak = max(peak, c)
+        worst = max(worst, (peak - c) / peak)
+    return worst
+
+
 def _fmt(m: dict) -> str:
     return f"{m['trades']:>4} trades {m['net_ret']:>+7.2%} win {m['win']:>4.0%} dd {m['dd']:>5.2%}"
 
@@ -322,7 +332,8 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
     print("=" * 100)
     base_train, base_test = _evaluate(train, current, args), _evaluate(test, current, args)
     print(f"  COMPRAR E SEGURAR (referência, 100% do capital, sem taxas de giro)")
-    print(f"         treino: {_buy_hold(train):>+7.2%}{'':>31}| validação: {_buy_hold(test):>+7.2%}")
+    print(f"         treino:            {_buy_hold(train):>+7.2%}          dd {_buy_hold_dd(train):>5.2%} | "
+          f"validação:            {_buy_hold(test):>+7.2%}          dd {_buy_hold_dd(test):>5.2%}")
     print(f"  ATUAL  {_describe(current)}")
     print(f"         treino: {_fmt(base_train)} | validação: {_fmt(base_test)}")
     results = []
