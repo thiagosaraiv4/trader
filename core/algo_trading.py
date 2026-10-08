@@ -624,8 +624,10 @@ class AlgoEngine:
         initial_session_balance: float = 10_000.0,
         on_circuit_breaker: Callable[[str], None] | None = None,
         params: StrategyParams | None = None,
+        circuit_breaker: bool = True,
     ) -> None:
         self._params: StrategyParams = params or StrategyParams()
+        self._circuit_breaker: bool = circuit_breaker
         self._strategy: IStrategy | None = None
         self._risk_manager: RiskManager = RiskManager(max_risk_per_trade_pct=risk_pct)
         self._enabled: bool = False
@@ -710,7 +712,7 @@ class AlgoEngine:
                 equity += position.size * price
             elif position.side == "SHORT":
                 equity -= position.size * price
-        if equity < self._initial_session_balance * 0.93 and not self._halted:
+        if self._circuit_breaker and equity < self._initial_session_balance * 0.93 and not self._halted:
             self._halted = True
             reason = "Drawdown >= 7% of session start balance"
             self._log.critical("CIRCUIT BREAKER TRIGGERED: " + reason)

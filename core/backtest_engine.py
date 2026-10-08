@@ -434,6 +434,7 @@ class BacktestEngine:
         warmup_bars: int | None = None,
         segments: list[ReplaySegment] | None = None,
         params: StrategyParams | None = None,
+        circuit_breaker: bool = True,
     ) -> None:
         """
         Args:
@@ -446,6 +447,7 @@ class BacktestEngine:
             params: Strategy/exit parameters (default: StrategyParams()).
         """
         self._params = params or StrategyParams()
+        self._circuit_breaker = circuit_breaker
         self._symbol = symbol
         self._timeframe = timeframe
         self._start_date = start_date or datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -706,6 +708,7 @@ class BacktestEngine:
                     cooldown_sec=self._cooldown_sec,
                     initial_session_balance=start_equity,
                     params=self._params,
+                    circuit_breaker=self._circuit_breaker,
                 )
                 algo_engine.set_strategy(
                     TrendFilteredMACrossStrategyV3(symbol=self._symbol, params=self._params)

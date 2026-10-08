@@ -236,13 +236,18 @@ def _grid() -> list[StrategyParams]:
 
 
 def _evaluate(bars: list[BarData], params: StrategyParams, args: argparse.Namespace) -> dict:
-    """Backtest one parameter set; metrics are net of fees."""
+    """
+    Backtest one parameter set; metrics are net of fees. The 7% circuit
+    breaker is off here: it would cap every losing set at the same -7% and
+    hide which is better or worse.
+    """
     result = BacktestEngine(
         symbol=args.symbol,
         timeframe=params.timeframe,
         initial_balance=args.balance,
         bars=bars,
         params=params,
+        circuit_breaker=False,
     ).run()
     pnls = _net_pnls(result, args.balance)
     return {
@@ -310,6 +315,7 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
     else:
         print(f"[✗] A melhor do treino NÃO se confirmou na validação "
               f"(precisa de lucro líquido e {_MIN_TEST_TRADES}+ trades). Não use.")
+    print("    (Circuit breaker de 7% desligado no otimizador; no robô ao vivo ele continua ativo.)")
     print("    Escolhida pelo treino; a validação é o número honesto. Escolher olhando a")
     print("    validação seria ajustar ao passado de novo.")
 
