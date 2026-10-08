@@ -308,16 +308,22 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
         print(f"         treino: {_fmt(m_train)} | validação: {_fmt(m_test)}")
     print("=" * 100)
 
-    best, _, best_test = results[0]
-    validated = best_test["net_ret"] > 0 and best_test["trades"] >= _MIN_TEST_TRADES
+    best, best_train, best_test = results[0]
+    # Must make money in BOTH periods: a loser in training that "wins" in
+    # validation is noise, not an edge
+    validated = (
+        best_train["net_ret"] > 0
+        and best_test["net_ret"] > 0
+        and best_test["trades"] >= _MIN_TEST_TRADES
+    )
     beats_current = best_test["net_ret"] > base_test["net_ret"]
     if validated and beats_current:
         print("[✓] A melhor do treino também lucrou na validação e superou a atual.")
     elif validated:
         print("[~] A melhor do treino lucrou na validação, mas não superou a atual.")
     else:
-        print(f"[✗] A melhor do treino NÃO se confirmou na validação "
-              f"(precisa de lucro líquido e {_MIN_TEST_TRADES}+ trades). Não use.")
+        print(f"[✗] Não aprovada: precisa de lucro líquido no treino E na validação, "
+              f"com {_MIN_TEST_TRADES}+ trades na validação. Não use.")
     print("    (Circuit breaker de 7% desligado no otimizador; no robô ao vivo ele continua ativo.)")
     print("    Escolhida pelo treino; a validação é o número honesto. Escolher olhando a")
     print("    validação seria ajustar ao passado de novo.")
