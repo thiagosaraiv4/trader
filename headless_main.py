@@ -182,8 +182,8 @@ class HeadlessTradingBot:
         baseline = float(breaker.get("baseline", start_equity))
 
         # Same strategy and parameters as BacktestEngine / run_comparison.py
+        # Risk per trade comes from the params (strategy.json risk_pct)
         self._algo_engine = AlgoEngine(
-            risk_pct=0.02,
             cooldown_sec=180.0,
             initial_session_balance=baseline,
             params=self._params,
@@ -218,6 +218,9 @@ class HeadlessTradingBot:
             extra={
                 "component": "headless",
                 "symbol": str(cfg.default_symbol),
+                "strategy": self._params.strategy,
+                "timeframe": self._params.timeframe,
+                "risk_pct": self._params.risk_pct,
                 "balance": round(self._core.balance, 2),
                 "trades": self._perf["trades"],
             },

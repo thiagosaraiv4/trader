@@ -677,7 +677,7 @@ class AlgoEngine:
 
     def __init__(
         self,
-        risk_pct: float = 0.02,
+        risk_pct: float | None = None,
         cooldown_sec: float = 180.0,
         initial_session_balance: float = 10_000.0,
         on_circuit_breaker: Callable[[str], None] | None = None,
@@ -686,6 +686,7 @@ class AlgoEngine:
         halted: bool = False,
     ) -> None:
         """
+        risk_pct: override of params.risk_pct (None = use the params).
         circuit_breaker: False disables the breaker regardless of params
             (the optimizer ranks parameter sets without it).
         halted: restore a breaker that already tripped (live restart).
@@ -695,7 +696,9 @@ class AlgoEngine:
         self._halt_pct: float = self._params.halt_pct if circuit_breaker else 0.0
         self.halted_at: float | None = None
         self._strategy: IStrategy | None = None
-        self._risk_manager: RiskManager = RiskManager(max_risk_per_trade_pct=risk_pct)
+        self._risk_manager: RiskManager = RiskManager(
+            max_risk_per_trade_pct=self._params.risk_pct if risk_pct is None else risk_pct,
+        )
         self._enabled: bool = False
         self._cooldown_sec: float = cooldown_sec
         self._last_trade_timestamp: float = 0.0

@@ -429,7 +429,7 @@ class BacktestEngine:
         initial_balance: float = 10_000.0,
         trade_size: float = 0.01,
         cooldown_sec: float = 180.0,
-        risk_pct: float = 0.02,
+        risk_pct: float | None = None,
         use_ccxt: bool = True,
         bars: list[BarData] | None = None,
         warmup_bars: int | None = None,
@@ -446,6 +446,7 @@ class BacktestEngine:
             segments: Replay of a live run recorded by the bot
                 (core/bar_log.load_segments). Takes precedence over bars.
             params: Strategy/exit parameters (default: StrategyParams()).
+            risk_pct: override of params.risk_pct (None = use the params).
         """
         self._params = params or StrategyParams()
         self._circuit_breaker = circuit_breaker

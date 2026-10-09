@@ -123,7 +123,7 @@ configurações.
 | `strategy` | Ideia | Timeframe padrão |
 |---|---|---|
 | `ma_cross_v3` | cruzamento EMA9 × SMA20 com filtros (original) | 1m |
-| `trend_v4` | seguir tendência: compra no rompimento da máxima de N candles (canal de Donchian), sai na perda da mínima de M candles ou no stop móvel; posição dimensionada pelo risco (~2% do capital no stop) | 4h |
+| `trend_v4` | seguir tendência: compra no rompimento da máxima de N candles (canal de Donchian), sai na perda da mínima de M candles ou no stop móvel; posição dimensionada pelo risco (`risk_pct`, padrão 2% do capital no stop) | 4h |
 
 ```bash
 python run_backtest.py --strategy trend_v4 --optimize          # 6 anos de 4h: 4 de treino, 2 de validação
@@ -131,6 +131,23 @@ python run_backtest.py --strategy trend_v4 --optimize --save   # grava se aprova
 ```
 
 A tabela mostra também **comprar e segurar** no mesmo período, como referência.
+
+### Risco por trade (`risk_pct`)
+
+Na `trend_v4` cada entrada é dimensionada para perder `risk_pct` do saldo se o stop inicial for
+atingido (padrão `0.02` = 2%; aceita de 0 a 10%), limitada a `max_position_pct` (95%) do saldo.
+Mais risco = posições maiores: ganhos **e** quedas crescem juntos — não cria vantagem.
+
+```bash
+python run_backtest.py --risk-sweep          # mesma estratégia com 0,5% a 5% por trade, treino e validação
+python run_backtest.py --risk 3              # backtest completo com 3%
+python run_backtest.py --risk 3 --save       # grava risk_pct=0.03 em strategy.json
+```
+
+A coluna `teto` mostra quantas entradas já usaram a posição máxima: nelas, aumentar o risco não
+muda nada. Escolha pela maior queda (`dd`) que você aguentaria sem desligar o robô. Mudar o
+`risk_pct` arquiva a sessão ao vivo e começa uma nova (`sudo systemctl restart trading-bot`).
+Na `ma_cross_v3` (posição fixa, `risk_sizing: false`) o parâmetro não se aplica.
 
 ### Rodar comparação Live vs Backtest
 

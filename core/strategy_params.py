@@ -29,6 +29,10 @@ STRATEGIES = ("ma_cross_v3", "trend_v4")
 # indicator may need more history than that.
 MAX_INDICATOR_PERIOD = 200
 
+# Highest accepted risk per trade (a 10% loss on every stop hit is already
+# far beyond what a trend strategy with ~35% winners can survive)
+MAX_RISK_PCT = 0.10
+
 # Default circuit breaker per strategy when halt_drawdown_pct is not set.
 # trend_v4 has normal drawdowns well above 7% (its per-trade risk is already
 # capped by the stop), so the breaker would end the test early.
@@ -73,6 +77,10 @@ class StrategyParams:
     # Size by the real stop distance (loss at stop ≈ risk_pct of balance);
     # False = legacy V3 sizing (always the max_position_pct cap)
     risk_sizing: bool = False
+    # Fraction of the balance lost if the initial stop is hit (with
+    # risk_sizing). More risk = bigger positions: gains AND drawdowns grow,
+    # until max_position_pct caps the position.
+    risk_pct: float = 0.02
 
     # --- trend_v4 (Donchian) ---------------------------------------------
     # Buy when the close breaks the highest high of the previous N bars;
@@ -126,6 +134,9 @@ class StrategyParams:
             fail("stop_atr must be > 0")
         if not 0 < self.max_position_pct < 1:
             fail("max_position_pct must be between 0 and 1 (exclusive; fees need cash)")
+        if (isinstance(self.risk_pct, bool) or not isinstance(self.risk_pct, (int, float))
+                or not 0 < self.risk_pct <= MAX_RISK_PCT):
+            fail(f"risk_pct must be a number in (0, {MAX_RISK_PCT}] (0.02 = 2% of the balance per trade)")
         if self.halt_drawdown_pct is not None and (
             isinstance(self.halt_drawdown_pct, bool)
             or not isinstance(self.halt_drawdown_pct, (int, float))

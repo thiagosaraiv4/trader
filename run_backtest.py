@@ -12,6 +12,9 @@ Uso:
     python run_backtest.py --optimize                  # procura parâmetros e valida
     python run_backtest.py --strategy trend_v4 --optimize   # tendência (Donchian) em 4h, 4 anos
     python run_backtest.py --optimize --save           # ...e grava em strategy.json
+    python run_backtest.py --risk-sweep                # mesmo setup com 0,5% a 5% de risco por trade
+    python run_backtest.py --risk 3                    # backtest arriscando 3% por trade
+    python run_backtest.py --risk 3 --save             # ...e grava risk_pct em strategy.json
 
 Usa os parâmetros de strategy.json (os mesmos do robô ao vivo), se existir.
 
@@ -44,7 +47,7 @@ from pathlib import Path
 from core.backtest_engine import BacktestEngine, BacktestResult, fetch_ohlcv_history
 from core.config import AppConfig
 from core.strategy_params import (
-    PARAMS_PATH, STRATEGIES, InvalidParams, StrategyParams, load_params, save_params,
+    MAX_RISK_PCT, PARAMS_PATH, STRATEGIES, InvalidParams, StrategyParams, load_params, save_params,
 )
 from core.types import BarData, Timeframe
 from utils.logger import configure_logging
@@ -75,6 +78,8 @@ _DEFAULT_DAYS = {"ma_cross_v3": 90, "trend_v4": 2190}
 # Fewer trades than this is indistinguishable from luck. Trend following on
 # 4h trades rarely by design, so it gets lower minimums and a longer history.
 _MIN_TRADES = {"ma_cross_v3": (30, 20), "trend_v4": (25, 12)}  # (train, validation)
+# Risk per trade levels compared by --risk-sweep (fraction of the balance)
+_RISK_LEVELS = (0.005, 0.01, 0.02, 0.03, 0.04, 0.05)
 
 
 def _parse_date(value: str) -> datetime:
@@ -82,6 +87,17 @@ def _parse_date(value: str) -> datetime:
         return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
         raise argparse.ArgumentTypeError(f"data inválida {value!r} (use AAAA-MM-DD)")
+
+
+def _parse_risk(value: str) -> float:
+    """--risk in percent of the balance (3 or 3% → 0.03)."""
+    try:
+        pct = float(value.rstrip("%").replace(",", "."))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"risco inválido {value!r} (ex.: 3 para 3%)")
+    if not 0 < pct / 100 <= MAX_RISK_PCT:
+        raise argparse.ArgumentTypeError(f"risco precisa estar entre 0 e {MAX_RISK_PCT:.0%} (ex.: 3)")
+    return pct / 100
 
 
 def _cache_path(exchange: str, symbol: str, timeframe: str, start: datetime, end: datetime) -> Path:
@@ -274,16 +290,38 @@ def _evaluate(bars: list[BarData], params: StrategyParams, args: argparse.Namesp
         "net_ret": (result.final_balance - args.balance) / args.balance,
         "win": (sum(1 for p in pnls if p > 0) / len(pnls)) if pnls else 0.0,
         "dd": result.max_drawdown,
+        "capped": _capped_share(result, args.balance, params.max_position_pct),
     }
 
 
-def _describe(p: StrategyParams) -> str:
+def _capped_share(result: BacktestResult, initial: float, max_position_pct: float) -> float:
+    """Share of entries whose size hit the max_position_pct cap: past that
+    point more risk per trade no longer makes the position any bigger."""
+    if not result.trade_log:
+        return 0.0
+    capped, prev = 0, initial
+    for t in result.trade_log:
+        # Every entry starts flat, so the cash before it is the whole equity
+        if t.position_usd >= prev * max_position_pct * 0.99:
+            capped += 1
+        prev = t.balance_after
+    return capped / len(result.trade_log)
+
+
+def _describe(p: StrategyParams, with_risk: bool = True) -> str:
+    risk = _describe_risk(p) if with_risk else ""
     if p.strategy == "trend_v4":
         trend = f"SMA{p.trend_sma}" if p.trend_sma else "sem filtro"
         return (f"entrada máx {p.donchian_entry:<2} saída mín {p.donchian_exit:<2} tendência {trend:<10} "
-                f"stop {p.stop_atr}ATR trail {p.trail_atr}ATR")
+                f"stop {p.stop_atr}ATR trail {p.trail_atr}ATR" + risk)
     return (f"atr≥{p.atr_filter_min:<4} cruz≤{p.cross_lookback} saída {p.exit_atr:<3}ATR "
-            f"stop {p.stop_atr}ATR trail {p.trail_activation_pct:.1%}/{p.trail_atr}ATR")
+            f"stop {p.stop_atr}ATR trail {p.trail_activation_pct:.1%}/{p.trail_atr}ATR" + risk)
+
+
+def _describe_risk(p: StrategyParams) -> str:
+    if p.risk_sizing:
+        return f" risco {p.risk_pct:.1%}"
+    return f" posição fixa {p.max_position_pct:.0%}"
 
 
 def _buy_hold(bars: list[BarData]) -> float:
@@ -312,13 +350,56 @@ def _fmt(m: dict) -> str:
             f" r/dd {_risk_adj(m['net_ret'], m['dd']):>4.1f}")
 
 
-def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Namespace) -> None:
+def _split(bars: list[BarData]) -> tuple[list[BarData], list[BarData]]:
+    """Training = first 2/3 of the simulated bars, validation = the rest."""
     sim = len(bars) - _WARMUP_BARS
     cut = _WARMUP_BARS + (sim * 2) // 3
     train = bars[:cut]
     test = bars[cut - _WARMUP_BARS:]  # test keeps its own warm-up bars
     print(f"[*] Treino:    {train[_WARMUP_BARS].timestamp:%Y-%m-%d} → {train[-1].timestamp:%Y-%m-%d}")
     print(f"[*] Validação: {test[_WARMUP_BARS].timestamp:%Y-%m-%d} → {test[-1].timestamp:%Y-%m-%d}")
+    return train, test
+
+
+def _risk_sweep(bars: list[BarData], current: StrategyParams, args: argparse.Namespace) -> None:
+    """Same strategy, several risk-per-trade levels, in training and validation."""
+    if not current.risk_sizing:
+        print(f"[!] {current.strategy} com risk_sizing=false: toda entrada usa "
+              f"{current.max_position_pct:.0%} do saldo, o risco por trade não muda nada.")
+        return
+    train, test = _split(bars)
+    levels = sorted(set(_RISK_LEVELS) | {current.risk_pct})
+    logging.getLogger().setLevel(logging.ERROR)
+
+    print("\n" + "=" * 104)
+    print(f"  Risco por trade — {_describe(current, with_risk=False)}")
+    print("  (líquido de taxas; teto = entradas limitadas por max_position_pct "
+          f"{current.max_position_pct:.0%})")
+    print("=" * 104)
+
+    def cell(ret: float, dd: float, trades: str = "", capped: str = "") -> str:
+        return (f"{trades:>11} {ret:>+8.2%} dd {dd:>6.2%} r/dd {_risk_adj(ret, dd):>4.1f} "
+                f"{capped:>9}")
+
+    hold = [cell(_buy_hold(b), _buy_hold_dd(b)) for b in (train, test)]
+    print(f"  {'comprar e segurar':<17} treino: {hold[0]} | validação: {hold[1]}".rstrip())
+    for level in levels:
+        p = replace(current, risk_pct=level)
+        row = []
+        for b in (train, test):
+            m = _evaluate(b, p, args)
+            row.append(cell(m["net_ret"], m["dd"], f"{m['trades']} trades", f"teto {m['capped']:.0%}"))
+        mark = "  ← atual" if level == current.risk_pct else ""
+        print(f"  {'risco ' + format(level, '.1%'):<17} treino: {row[0]} | validação: {row[1]}{mark}")
+    print("=" * 104)
+    print("  Mais risco por trade não cria vantagem: aumenta ganhos E quedas juntos (r/dd parecido).")
+    print("  'teto' = entradas que já usaram o máximo da posição: nelas, mais risco não muda nada.")
+    print("  Escolha pela maior queda (dd) que você aguentaria sem desligar o robô — a do passado")
+    print("  não é o limite do futuro. Para usar: python run_backtest.py --risk N --save (N em %)")
+
+
+def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Namespace) -> None:
+    train, test = _split(bars)
 
     candidates = _grid(current)
     # The engine warns about small samples on every run; the table already shows trade counts
@@ -416,12 +497,24 @@ def main() -> None:
     parser.add_argument("--no-cache", action="store_true", help="baixa de novo mesmo com cache")
     parser.add_argument("--optimize", action="store_true",
                         help="testa combinações no treino (2/3) e valida no resto (1/3)")
+    parser.add_argument("--risk", type=_parse_risk, metavar="PCT",
+                        help="%% do saldo perdido se o stop for atingido (ex.: 3 = 3%%); "
+                             "padrão: risk_pct de strategy.json")
+    parser.add_argument("--risk-sweep", action="store_true",
+                        help="compara níveis de risco por trade no treino e na validação")
     parser.add_argument("--save", action="store_true",
-                        help="com --optimize: grava a melhor em strategy.json se ela se validar")
+                        help="com --optimize: grava a melhor em strategy.json se ela se validar; "
+                             "com --risk: grava o risco em strategy.json")
     args = parser.parse_args()
+    if args.optimize and args.risk_sweep:
+        parser.error("use --optimize ou --risk-sweep, não os dois")
+    if args.save and args.risk_sweep:
+        parser.error("--risk-sweep só compara; para gravar use --risk N --save")
+    if args.save and not (args.optimize or args.risk is not None):
+        parser.error("--save precisa de --optimize ou --risk")
 
     try:
-        params = load_params()
+        params = stored = load_params()
     except InvalidParams as e:
         parser.error(f"strategy.json inválido: {e}")
     if args.strategy and args.strategy != params.strategy:
@@ -431,6 +524,23 @@ def main() -> None:
     if args.timeframe:
         params = replace(params, timeframe=args.timeframe)
     args.timeframe = params.timeframe
+    if args.risk is not None:
+        if not params.risk_sizing:
+            parser.error(f"{params.strategy} usa posição fixa (risk_sizing=false): --risk não se aplica")
+        params = replace(params, risk_pct=args.risk)
+
+    # A risk-only --save needs no data: risk per trade is a choice of how big
+    # a drawdown to accept, not something fitted to the past
+    if args.save and not args.optimize:
+        if params == stored and PARAMS_PATH.exists():
+            print(f"[*] {PARAMS_PATH.name} já está com risk_pct={params.risk_pct:g}: nada mudou.")
+            return
+        save_params(params)
+        print(f"[*] risk_pct={params.risk_pct:g} gravado em {PARAMS_PATH.name} ({_describe(params)} | "
+              f"{params.timeframe}).")
+        print("    No servidor: sudo systemctl restart trading-bot (o robô arquiva a sessão antiga e "
+              "começa uma nova)")
+        return
 
     # Only warnings from the engine (it logs every signal at INFO)
     configure_logging(level=logging.WARNING)
@@ -469,6 +579,9 @@ def main() -> None:
 
     if args.optimize:
         _optimize(bars, params, args)
+        return
+    if args.risk_sweep:
+        _risk_sweep(bars, params, args)
         return
 
     print("[*] Simulando...")
