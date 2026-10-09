@@ -302,8 +302,14 @@ def _buy_hold_dd(bars: list[BarData]) -> float:
     return worst
 
 
+def _risk_adj(ret: float, dd: float) -> float:
+    """Return per unit of drawdown (higher = more return for the same pain)."""
+    return ret / max(dd, 0.01)
+
+
 def _fmt(m: dict) -> str:
-    return f"{m['trades']:>4} trades {m['net_ret']:>+7.2%} win {m['win']:>4.0%} dd {m['dd']:>5.2%}"
+    return (f"{m['trades']:>4} trades {m['net_ret']:>+7.2%} win {m['win']:>4.0%} dd {m['dd']:>5.2%}"
+            f" r/dd {_risk_adj(m['net_ret'], m['dd']):>4.1f}")
 
 
 def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Namespace) -> None:
@@ -337,8 +343,11 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
     print("=" * 100)
     base_train, base_test = _evaluate(train, current, args), _evaluate(test, current, args)
     print(f"  COMPRAR E SEGURAR (referência, 100% do capital, sem taxas de giro)")
-    print(f"         treino:            {_buy_hold(train):>+7.2%}          dd {_buy_hold_dd(train):>5.2%} | "
-          f"validação:            {_buy_hold(test):>+7.2%}          dd {_buy_hold_dd(test):>5.2%}")
+    hold_r = (_risk_adj(_buy_hold(train), _buy_hold_dd(train)), _risk_adj(_buy_hold(test), _buy_hold_dd(test)))
+    print(f"         treino:            {_buy_hold(train):>+7.2%}          dd {_buy_hold_dd(train):>5.2%}"
+          f" r/dd {hold_r[0]:>4.1f} | "
+          f"validação:            {_buy_hold(test):>+7.2%}          dd {_buy_hold_dd(test):>5.2%}"
+          f" r/dd {hold_r[1]:>4.1f}")
     print(f"  ATUAL  {_describe(current)}")
     print(f"         treino: {_fmt(base_train)} | validação: {_fmt(base_test)}")
     results = []
@@ -357,20 +366,28 @@ def _optimize(bars: list[BarData], current: StrategyParams, args: argparse.Names
         and best_test["net_ret"] > 0
         and best_test["trades"] >= min_test
     )
-    beats_current = best_test["net_ret"] > base_test["net_ret"]
+    # "Better" = more return per unit of drawdown, not just more return:
+    # a bigger return bought with a much deeper drawdown is not an upgrade
+    best_r = _risk_adj(best_test["net_ret"], best_test["dd"])
+    base_r = _risk_adj(base_test["net_ret"], base_test["dd"])
+    beats_current = best_r > base_r
     if validated and beats_current:
-        print("[✓] A melhor do treino também lucrou na validação e superou a atual.")
+        print("[✓] A melhor do treino lucrou na validação e tem melhor retorno/queda (r/dd) que a atual.")
     elif validated:
-        print("[~] A melhor do treino lucrou na validação, mas não superou a atual.")
+        print(f"[~] A melhor do treino lucrou na validação, mas o r/dd dela ({best_r:.1f}) "
+              f"não supera o da atual ({base_r:.1f}). Mantenha a atual.")
     else:
         print(f"[✗] Não aprovada: precisa de lucro líquido no treino E na validação, "
               f"com {min_test}+ trades na validação. Não use.")
     hold_test = _buy_hold(test)
-    if best_test["net_ret"] > hold_test:
-        print(f"    Na validação a escolhida ({best_test['net_ret']:+.2%}) ganhou de comprar e segurar ({hold_test:+.2%}).")
+    verb = "ganhou" if best_test["net_ret"] > hold_test else "NÃO ganhou"
+    verb_r = "melhor" if best_r > hold_r[1] else "pior"
+    print(f"    Na validação a escolhida ({best_test['net_ret']:+.2%}) {verb} de comprar e segurar "
+          f"({hold_test:+.2%}) em retorno; em retorno/queda foi {verb_r} ({best_r:.1f} vs {hold_r[1]:.1f}).")
+    if current.halt_pct > 0:
+        print(f"    (Circuit breaker de {current.halt_pct:.0%} desligado no otimizador; no robô ao vivo ele está ativo.)")
     else:
-        print(f"    Na validação a escolhida ({best_test['net_ret']:+.2%}) NÃO ganhou de comprar e segurar ({hold_test:+.2%}).")
-    print("    (Circuit breaker de 7% desligado no otimizador; no robô ao vivo ele continua ativo.)")
+        print("    (Circuit breaker desligado — também no robô ao vivo, para esta estratégia.)")
     print("    Escolhida pelo treino; a validação é o número honesto. Escolher olhando a")
     print("    validação seria ajustar ao passado de novo.")
 
