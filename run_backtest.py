@@ -43,8 +43,10 @@ from pathlib import Path
 
 from core.backtest_engine import BacktestEngine, BacktestResult, fetch_ohlcv_history
 from core.config import AppConfig
-from core.strategy_params import PARAMS_PATH, STRATEGIES, StrategyParams, load_params, save_params
-from core.types import BarData
+from core.strategy_params import (
+    PARAMS_PATH, STRATEGIES, InvalidParams, StrategyParams, load_params, save_params,
+)
+from core.types import BarData, Timeframe
 from utils.logger import configure_logging
 
 _CACHE_DIR = Path(__file__).resolve().parent / "backtest_cache"
@@ -191,6 +193,9 @@ def _net_pnls(result: BacktestResult, initial: float) -> list[float]:
 
 def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -> None:
     print(result.summary())
+    if result.halted_at is not None:
+        print(f"  [!] Circuit breaker disparou em {result.halted_at:%Y-%m-%d %H:%M} UTC: "
+              "nenhuma entrada depois disso (como no robô ao vivo).")
 
     sim_bars = bars[_WARMUP_BARS:]
     gross = sum(t.profit for t in result.trade_log)
@@ -384,7 +389,8 @@ def main() -> None:
     parser.add_argument("--days", type=int, help="dias até --end (padrão: 90; 1460 na trend_v4)")
     parser.add_argument("--start", type=_parse_date, help="início AAAA-MM-DD (UTC); ignora --days")
     parser.add_argument("--end", type=_parse_date, help="fim AAAA-MM-DD (UTC, exclusivo); padrão: hoje 00:00")
-    parser.add_argument("--timeframe", help="padrão: o de strategy.json (o do robô ao vivo)")
+    parser.add_argument("--timeframe", choices=[t.value for t in Timeframe],
+                        help="padrão: o de strategy.json (o do robô ao vivo)")
     parser.add_argument("--strategy", choices=STRATEGIES,
                         help="padrão: a de strategy.json; outra estratégia começa dos valores padrão dela")
     parser.add_argument("--symbol", default=str(cfg.default_symbol))
@@ -397,7 +403,10 @@ def main() -> None:
                         help="com --optimize: grava a melhor em strategy.json se ela se validar")
     args = parser.parse_args()
 
-    params = load_params()
+    try:
+        params = load_params()
+    except InvalidParams as e:
+        parser.error(f"strategy.json inválido: {e}")
     if args.strategy and args.strategy != params.strategy:
         params = StrategyParams.defaults_for(args.strategy)
     if args.days is None:

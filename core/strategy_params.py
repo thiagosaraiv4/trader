@@ -10,10 +10,12 @@ reproduce the original hard-coded V3 behaviour.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from core.types import Timeframe
 from utils.logger import get_logger
 
 _log = get_logger(__name__, component="strategy_params")
@@ -22,6 +24,19 @@ PARAMS_PATH = Path(__file__).resolve().parent.parent / "strategy.json"
 
 
 STRATEGIES = ("ma_cross_v3", "trend_v4")
+
+# The live bot warms up on a 200-closed-bar snapshot (headless_main.py), so no
+# indicator may need more history than that.
+MAX_INDICATOR_PERIOD = 200
+
+# Default circuit breaker per strategy when halt_drawdown_pct is not set.
+# trend_v4 has normal drawdowns well above 7% (its per-trade risk is already
+# capped by the stop), so the breaker would end the test early.
+_DEFAULT_HALT = {"ma_cross_v3": 0.07, "trend_v4": 0.0}
+
+
+class InvalidParams(ValueError):
+    """strategy.json / parameters that the bot must not run with."""
 
 
 @dataclass(frozen=True)
@@ -67,6 +82,57 @@ class StrategyParams:
     # Only buy above SMA(trend_sma); 0 disables the filter
     trend_sma: int = 200
 
+    # --- Circuit breaker -------------------------------------------------
+    # Stop opening positions once equity falls this fraction below the
+    # session start (0 = off). None = strategy default (see _DEFAULT_HALT).
+    halt_drawdown_pct: float | None = None
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    @property
+    def halt_pct(self) -> float:
+        """Effective circuit-breaker drawdown (0 = disabled)."""
+        if self.halt_drawdown_pct is None:
+            return _DEFAULT_HALT.get(self.strategy, 0.07)
+        return self.halt_drawdown_pct
+
+    def validate(self) -> None:
+        """Raise InvalidParams for values the bot can't run with."""
+        def fail(msg: str) -> None:
+            raise InvalidParams(msg)
+
+        if self.strategy not in STRATEGIES:
+            fail(f"strategy {self.strategy!r} not in {STRATEGIES}")
+        valid_tf = [t.value for t in Timeframe]
+        if self.timeframe not in valid_tf:
+            fail(f"timeframe {self.timeframe!r} not in {valid_tf}")
+        for name in ("trend_filter", "risk_sizing"):
+            if not isinstance(getattr(self, name), bool):
+                fail(f"{name} must be true/false")
+        for name in ("cross_lookback", "donchian_entry", "donchian_exit", "trend_sma"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int):
+                fail(f"{name} must be an integer")
+            low = 0 if name == "trend_sma" else 1
+            if not low <= v <= MAX_INDICATOR_PERIOD:
+                fail(f"{name}={v} must be between {low} and {MAX_INDICATOR_PERIOD}")
+        for name in ("atr_filter_min", "atr_filter_max", "exit_atr", "stop_atr",
+                     "trail_activation_pct", "trail_atr", "trail_min_pct", "max_position_pct"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                fail(f"{name} must be a number >= 0")
+        if self.stop_atr <= 0:
+            fail("stop_atr must be > 0")
+        if not 0 < self.max_position_pct < 1:
+            fail("max_position_pct must be between 0 and 1 (exclusive; fees need cash)")
+        if self.halt_drawdown_pct is not None and (
+            isinstance(self.halt_drawdown_pct, bool)
+            or not isinstance(self.halt_drawdown_pct, (int, float))
+            or not 0 <= self.halt_drawdown_pct < 1
+        ):
+            fail("halt_drawdown_pct must be null or a number in [0, 1)")
+
     @classmethod
     def defaults_for(cls, strategy: str) -> StrategyParams:
         """Sensible starting point for each strategy."""
@@ -90,23 +156,44 @@ class StrategyParams:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> StrategyParams:
+        if not isinstance(data, dict):
+            raise InvalidParams("expected a JSON object")
         known = {f.name for f in fields(cls)}
         unknown = set(data) - known
         if unknown:
             _log.warning(f"Ignoring unknown strategy params: {sorted(unknown)}")
-        return replace(cls(), **{k: v for k, v in data.items() if k in known})
+        # Missing keys take the defaults of the chosen strategy
+        base = cls.defaults_for(data.get("strategy", cls().strategy)) \
+            if data.get("strategy", cls().strategy) in STRATEGIES else cls()
+        try:
+            return replace(base, **{k: v for k, v in data.items() if k in known})
+        except TypeError as e:
+            raise InvalidParams(str(e)) from e
 
 
 def load_params(path: Path = PARAMS_PATH) -> StrategyParams:
-    """strategy.json if present (invalid file → defaults, with a warning)."""
+    """
+    strategy.json if present, else the defaults.
+
+    An unreadable or invalid file raises InvalidParams: the live bot must not
+    silently fall back to another strategy (it would archive the running
+    session and trade something else).
+    """
     if not path.exists():
         return StrategyParams()
     try:
-        return StrategyParams.from_dict(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, TypeError) as e:
-        _log.warning(f"Invalid {path.name} ({e}) — using default strategy params")
-        return StrategyParams()
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise InvalidParams(f"{path.name}: {e}") from e
+    try:
+        return StrategyParams.from_dict(data)
+    except InvalidParams as e:
+        raise InvalidParams(f"{path.name}: {e}") from e
 
 
 def save_params(params: StrategyParams, path: Path = PARAMS_PATH) -> None:
-    path.write_text(json.dumps(params.to_dict(), indent=2) + "\n", encoding="utf-8")
+    """Atomic write (a crash mid-write must not leave a half file behind)."""
+    params.validate()
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(params.to_dict(), indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)

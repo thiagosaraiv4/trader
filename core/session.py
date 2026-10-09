@@ -14,6 +14,7 @@ Design:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,7 @@ def save_session(
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
             f.flush()
+            os.fsync(f.fileno())
         tmp_path.replace(SESSION_PATH)
         _log.info("Session saved", extra={"path": str(SESSION_PATH)})
     except (OSError, TypeError) as e:
@@ -122,12 +124,17 @@ def load_session(timeframe_seconds: int = 60) -> SessionState | None:
             meta=meta,
         )
 
-    except json.JSONDecodeError as e:
-        _log.warning(f"Session file corrupted (invalid JSON): {e}")
-        return None
-    except KeyError as e:
-        _log.warning(f"Session file missing required key: {e}")
-        return None
     except Exception as e:
-        _log.warning(f"Unexpected error loading session: {e}")
+        # Keep the unreadable file for inspection instead of letting the next
+        # save overwrite it with a fresh session
+        _log.error(f"Session file unreadable ({e!r}) — moved aside")
+        _move_aside(SESSION_PATH)
         return None
+
+
+def _move_aside(path: Path) -> None:
+    try:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        path.replace(path.with_name(f"{path.stem}.corrupt-{stamp}{path.suffix}"))
+    except OSError as e:
+        _log.error(f"Could not move {path.name} aside: {e}")

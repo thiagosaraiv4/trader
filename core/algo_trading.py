@@ -683,16 +683,24 @@ class AlgoEngine:
         on_circuit_breaker: Callable[[str], None] | None = None,
         params: StrategyParams | None = None,
         circuit_breaker: bool = True,
+        halted: bool = False,
     ) -> None:
+        """
+        circuit_breaker: False disables the breaker regardless of params
+            (the optimizer ranks parameter sets without it).
+        halted: restore a breaker that already tripped (live restart).
+        """
         self._params: StrategyParams = params or StrategyParams()
-        self._circuit_breaker: bool = circuit_breaker
+        # Breaker threshold comes from the strategy params (0 = off)
+        self._halt_pct: float = self._params.halt_pct if circuit_breaker else 0.0
+        self.halted_at: float | None = None
         self._strategy: IStrategy | None = None
         self._risk_manager: RiskManager = RiskManager(max_risk_per_trade_pct=risk_pct)
         self._enabled: bool = False
         self._cooldown_sec: float = cooldown_sec
         self._last_trade_timestamp: float = 0.0
         self._prev_position_side: str = "FLAT"
-        self._halted: bool = False
+        self._halted: bool = halted
         self._initial_session_balance: float = initial_session_balance
         self._on_circuit_breaker: Callable[[str], None] | None = on_circuit_breaker
         self._log = get_logger(__name__, component="algo_engine")
@@ -730,6 +738,16 @@ class AlgoEngine:
             "Strategy set",
             extra={"strategy": strategy.name},
         )
+
+    @property
+    def halted(self) -> bool:
+        """True once the circuit breaker tripped: no new entries."""
+        return self._halted
+
+    @property
+    def initial_session_balance(self) -> float:
+        """Equity baseline of the circuit breaker."""
+        return self._initial_session_balance
 
     def set_halted(self, halted: bool) -> None:
         """Set the halted state (e.g. by MarketMonitor)."""
@@ -770,10 +788,15 @@ class AlgoEngine:
                 equity += position.size * price
             elif position.side == "SHORT":
                 equity -= position.size * price
-        if self._circuit_breaker and equity < self._initial_session_balance * 0.93 and not self._halted:
+        if (
+            self._halt_pct > 0
+            and not self._halted
+            and equity < self._initial_session_balance * (1 - self._halt_pct)
+        ):
             self._halted = True
-            reason = "Drawdown >= 7% of session start balance"
-            self._log.critical("CIRCUIT BREAKER TRIGGERED: " + reason)
+            self.halted_at = timestamp
+            reason = f"Drawdown >= {self._halt_pct:.0%} of session start equity"
+            self._log.critical("CIRCUIT BREAKER TRIGGERED: " + reason + " — no new entries")
             if self._on_circuit_breaker is not None:
                 self._on_circuit_breaker(reason)
 
@@ -812,9 +835,12 @@ class AlgoEngine:
                     return None
                     
                 if self._halted:
+                    self._log.info(
+                        "Entry signal ignored: circuit breaker halted",
+                        extra={"price": price},
+                    )
                     return None
 
-                    
                 # Check cooldown only for entry orders
                 if timestamp is not None:
                     elapsed = timestamp - self._last_trade_timestamp

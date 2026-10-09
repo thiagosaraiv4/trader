@@ -38,7 +38,7 @@ from core.bar_log import BAR_LOG_PATH, append_bars, bars_from_dataframe, new_run
 from core.config import AppConfig
 from core.paper_trading import OrderRequest, PaperTradingCore, PositionSnapshot, TradeResult
 from core.session import SESSION_PATH, load_session, save_session
-from core.strategy_params import StrategyParams, load_params
+from core.strategy_params import InvalidParams, StrategyParams, load_params
 from core.types import BarData, FeedConfig, FeedStateChange, ProviderID, Timeframe
 from data.feed import DataFeedManager
 
@@ -66,6 +66,7 @@ class _HeadlessJsonFormatter(logging.Formatter):
             "return_pct", "streak", "reason", "elapsed",
             "from_state", "to_state", "error", "provider", "strategy",
             "retry", "backoff_sec", "consecutive_errors", "position", "equity",
+            "halted", "exchange",
         ):
             val = getattr(record, key, None)
             if val is not None:
@@ -126,9 +127,18 @@ class HeadlessTradingBot:
         self._seg: str = ""
 
         # -- Restore session -----------------------------------------------
+        session_existed = SESSION_PATH.exists()
         session = load_session(
             timeframe_seconds=cfg.default_timeframe.to_seconds()
         )
+        if session is None and session_existed:
+            # Unreadable session.json (moved aside by load_session): don't
+            # mix the old live_bars.csv into the fresh session
+            archive = _archive_run()
+            log.error(
+                "session_unreadable — starting fresh",
+                extra={"component": "headless", "reason": str(archive)},
+            )
         if session is not None and self._params_changed(session.meta):
             # Different parameters = a different experiment: start a clean
             # session so live results and run_comparison.py stay meaningful.
@@ -158,35 +168,43 @@ class HeadlessTradingBot:
         )
 
         # -- Algo Engine + Strategy ----------------------------------------
-        # Circuit breaker baseline = equity, not cash (a restored open
-        # position has its cost already deducted from the cash balance).
+        # Circuit breaker state survives restarts (session meta), so a
+        # restart neither clears a tripped breaker nor moves its baseline.
+        # Baseline = equity, not cash (a restored open position has its cost
+        # already deducted from the cash balance).
+        breaker = (session.meta.get("breaker") if session else None) or {}
         pos = self._core.position
         start_equity = self._core.balance
         if pos.side == "LONG":
             start_equity += pos.size * pos.entry_price
         elif pos.side == "SHORT":
             start_equity -= pos.size * pos.entry_price
+        baseline = float(breaker.get("baseline", start_equity))
 
         # Same strategy and parameters as BacktestEngine / run_comparison.py
         self._algo_engine = AlgoEngine(
             risk_pct=0.02,
             cooldown_sec=180.0,
-            initial_session_balance=start_equity,
+            initial_session_balance=baseline,
             params=self._params,
+            halted=bool(breaker.get("halted", False)),
         )
         strategy = create_strategy(str(cfg.default_symbol), self._params)
         self._algo_engine.set_strategy(strategy)
         self._algo_engine.enable()
 
         # -- Performance tracking (O(1) incremental) -----------------------
+        # Every session starts at 10,000 (a parameter change archives the
+        # old one), and the trade log replay below rebuilds the real peak.
         self._perf: dict[str, Any] = {
             "trades": 0,
             "wins": 0,
-            "gross_profit": 0.0,
-            "gross_loss": 0.0,
-            "peak_balance": start_equity,
+            "gross_profit": 0.0,   # net of fees, despite the name
+            "gross_loss": 0.0,     # net of fees, despite the name
+            "peak_balance": 10_000.0,
             "max_drawdown_pct": 0.0,
             "streak": 0,
+            "last_close_balance": 10_000.0,
         }
 
         # Rehydrate from trade log
@@ -219,7 +237,9 @@ class HeadlessTradingBot:
         pass  # Only log trade events, not every tick update
 
     def _on_order_filled(self, result: TradeResult) -> None:
-        event = "trade_open" if result.side == "BUY" else "trade_close"
+        # A SELL fill is logged as "order_filled"; "trade_close" (with PnL)
+        # comes from _on_trade_closed, once per trade
+        event = "trade_open" if result.side == "BUY" else "order_filled"
         log.info(
             event,
             extra={
@@ -250,8 +270,14 @@ class HeadlessTradingBot:
         self._emit_performance_log()
 
     def _update_perf(self, trade: dict[str, Any]) -> None:
-        """O(1) incremental performance metric update."""
-        pnl = trade.get("closed_pnl", 0.0)
+        """
+        O(1) incremental performance metric update, net of fees: each trade
+        starts and ends flat, so the change in cash between consecutive
+        closes is exactly its result after both commissions.
+        """
+        balance_after = trade.get("balance_after", self._core.balance)
+        pnl = balance_after - self._perf["last_close_balance"]
+        self._perf["last_close_balance"] = balance_after
         self._perf["trades"] += 1
         if pnl > 0:
             self._perf["wins"] += 1
@@ -265,11 +291,14 @@ class HeadlessTradingBot:
                 self._perf["streak"] = 0
             self._perf["streak"] -= 1
 
-        balance = trade.get("balance_after", self._core.balance)
-        if balance > self._perf["peak_balance"]:
-            self._perf["peak_balance"] = balance
+        self._track_drawdown(balance_after)
+
+    def _track_drawdown(self, equity: float) -> None:
+        """Max drawdown from closed balances and periodic equity samples."""
+        if equity > self._perf["peak_balance"]:
+            self._perf["peak_balance"] = equity
         if self._perf["peak_balance"] > 0:
-            dd = (self._perf["peak_balance"] - balance) / self._perf["peak_balance"]
+            dd = (self._perf["peak_balance"] - equity) / self._perf["peak_balance"]
             if dd > self._perf["max_drawdown_pct"]:
                 self._perf["max_drawdown_pct"] = dd
 
@@ -354,7 +383,11 @@ class HeadlessTradingBot:
           are those of the last poll (at most one poll interval old).
         - If whole bars were missed (poll outage), the last poll of the old
           bar is stale too: re-fetch the snapshot instead of trading on it.
+        - A lagging response with an older candle is ignored (it would
+          otherwise close the same bar twice and mark a stale price).
         """
+        if self._forming_bar is not None and bar.timestamp < self._forming_bar.timestamp:
+            return
         self._core.update_mark_price(bar)
 
         prev = self._forming_bar
@@ -424,7 +457,13 @@ class HeadlessTradingBot:
             balance=state["balance"],
             open_position=state["open_position"],
             trade_log=state["trade_log"],
-            meta={"strategy_params": self._params.to_dict()},
+            meta={
+                "strategy_params": self._params.to_dict(),
+                "breaker": {
+                    "baseline": self._algo_engine.initial_session_balance,
+                    "halted": self._algo_engine.halted,
+                },
+            },
         )
         log.info(
             "session_saved",
@@ -503,7 +542,9 @@ class HeadlessTradingBot:
                 self._emit_performance_log()
 
     def _emit_heartbeat(self) -> None:
-        """Periodic proof of life: last price, closed bars processed, equity."""
+        """Periodic proof of life: price, bars, equity, breaker, data source."""
+        equity = self._equity()
+        self._track_drawdown(equity)
         log.info(
             "heartbeat",
             extra={
@@ -512,7 +553,9 @@ class HeadlessTradingBot:
                 "bars": self._bar_count,
                 "position": self._core.position.side,
                 "balance": round(self._core.balance, 2),
-                "equity": round(self._equity(), 2),
+                "equity": round(equity, 2),
+                "halted": self._algo_engine.halted,
+                "exchange": self._feed.source if self._feed is not None else None,
             },
         )
 
@@ -589,6 +632,14 @@ def main() -> None:
 
     try:
         asyncio.run(run())
+    except InvalidParams as e:
+        # Never trade with a fallback strategy: stop until strategy.json is fixed.
+        # Exit code 2 = configuration error (systemd does not restart on it).
+        log.error(
+            "invalid_strategy_json — bot NOT started; fix strategy.json and restart",
+            extra={"component": "headless", "error": str(e)},
+        )
+        sys.exit(2)
     except KeyboardInterrupt:
         log.info("KeyboardInterrupt — exiting", extra={"component": "headless"})
     sys.exit(0)

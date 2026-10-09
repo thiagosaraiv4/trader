@@ -171,7 +171,7 @@ bash scripts/watchdog.sh status
 tail -20 logs/bot.log | python -m json.tool --json-lines
 ```
 
-### 3. Prova de vida (a cada 5 min: preço atual, candles processados, posição, patrimônio)
+### 3. Prova de vida (a cada 5 min: preço, candles processados, posição, patrimônio, exchange, circuit breaker)
 
 ```bash
 grep '"heartbeat"' logs/bot.log | tail -1 | python -m json.tool
@@ -231,7 +231,18 @@ tail -f logs/bot.log                  # logs
 git pull && sudo systemctl restart trading-bot   # atualizar
 ```
 
-Na VM use o serviço **ou** o `watchdog.sh`, nunca os dois.
+Na VM use o serviço **ou** o `watchdog.sh`, nunca os dois (`watchdog.sh status` não enxerga o
+serviço; use `systemctl status`).
+
+Se o `strategy.json` estiver inválido, o robô **não inicia** (sai com código 2 e o log mostra
+`invalid_strategy_json`) em vez de rodar outra estratégia — corrija o arquivo e reinicie.
+
+### Circuit breaker
+
+`halt_drawdown_pct` no `strategy.json`: para de abrir posições quando o patrimônio cai essa fração
+abaixo do início da sessão (0 = desligado). Padrão: 7% na `ma_cross_v3`, **desligado na `trend_v4`**
+(quedas de 10–20% são normais nela; o risco por trade já é limitado pelo stop). O estado sobrevive a
+reinícios e aparece no `heartbeat` (`"halted"`).
 
 ---
 

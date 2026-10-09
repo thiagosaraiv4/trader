@@ -74,6 +74,8 @@ StandardOutput=append:${REPO_DIR}/logs/bot.log
 StandardError=append:${REPO_DIR}/logs/bot.log
 Restart=on-failure
 RestartSec=10
+# Exit code 2 = invalid strategy.json: wait for a fix instead of looping
+RestartPreventExitStatus=2
 KillSignal=SIGTERM
 TimeoutStopSec=40
 

@@ -122,6 +122,7 @@ class BacktestResult:
     max_position_usd: float = 0.0
     trades_per_month_avg: float = 0.0
     low_sample_warning: bool = False
+    halted_at: datetime | None = None  # circuit breaker trip (no entries after)
     data_source: str = ""  # "preloaded" | "ccxt/binance" | "synthetic"
     equity_curve: list[float] = field(default_factory=list)
     trade_log: list[TradeLog] = field(default_factory=list)
@@ -593,6 +594,7 @@ class BacktestEngine:
             was_trailing_active: bool,
             bar: BarData,
             algo_closed: bool,
+            prev_stop: float = 0.0,
         ) -> None:
             """Record an opened/closed position after a fill or a mark-price update."""
             nonlocal current_entry
@@ -604,11 +606,13 @@ class BacktestEngine:
                     "price": pos.entry_price,
                     "side": pos.side,
                     "position_usd": pos.size * pos.entry_price,
+                    "stop0": pos.trailing_stop_price,
                 }
             elif prev_side != "FLAT" and pos.side == "FLAT" and current_entry is not None:
                 if algo_closed:
                     exit_reason = "momentum"
-                elif was_trailing_active:
+                elif was_trailing_active and prev_stop > current_entry["stop0"] + 1e-9:
+                    # The trailing stop had moved above the initial hard stop
                     exit_reason = "trailing"
                 else:
                     exit_reason = "hard_stop"
@@ -631,11 +635,23 @@ class BacktestEngine:
             prev_side = paper_engine.position.side
             prev_realized = paper_engine.position.realized_pnl
             was_trailing_active = paper_engine.position.trailing_active
+            prev_stop = paper_engine.position.trailing_stop_price
             paper_engine.update_mark_price(bar)
             track_position_change(
                 prev_side, prev_realized, was_trailing_active, bar,
-                algo_closed=False,
+                algo_closed=False, prev_stop=prev_stop,
             )
+
+        def poll(bar: BarData, px: float) -> None:
+            """
+            One live poll at price px within bar. A long stop crossed between
+            polls fills at the stop level (the live bot polls every 5 s, so it
+            sees the cross close to the stop), never at the bar's extreme.
+            """
+            pos = paper_engine.position
+            if pos.side == "LONG" and pos.size > 0 and px <= pos.trailing_stop_price:
+                px = pos.trailing_stop_price
+            mark(BarData(timestamp=bar.timestamp, open=px, high=px, low=px, close=px, volume=0.0))
 
         def close_bar(bar: BarData, fill_price: float, fill_bar: BarData, allow_entry: bool = True) -> None:
             """
@@ -699,13 +715,21 @@ class BacktestEngine:
                 elif pos.side == "SHORT":
                     start_equity -= pos.size * pos.entry_price
 
+                # The live bot keeps the breaker state across restarts
+                # (session meta): same baseline, same halt.
+                prev_engine = algo_engine
                 algo_engine = AlgoEngine(
                     risk_pct=self._risk_pct,
                     cooldown_sec=self._cooldown_sec,
-                    initial_session_balance=start_equity,
+                    initial_session_balance=(
+                        prev_engine.initial_session_balance if prev_engine else start_equity
+                    ),
                     params=self._params,
                     circuit_breaker=self._circuit_breaker,
+                    halted=prev_engine.halted if prev_engine else False,
                 )
+                if prev_engine is not None:
+                    algo_engine.halted_at = prev_engine.halted_at
                 algo_engine.set_strategy(create_strategy(self._symbol, self._params))
                 algo_engine.enable()
 
@@ -728,8 +752,13 @@ class BacktestEngine:
                 if unclosed is not None:
                     close_bar(unclosed, float(bar.open), bar)
 
-                # Step 3: last poll — stops / trailing at the close
-                mark(bar)
+                # Step 3: the rest of the bar as the live polls see it —
+                # bullish O→L→H→C, bearish O→H→L→C: stops can trigger on the
+                # low, trailing stops ratchet on the high.
+                o, c = float(bar.open), float(bar.close)
+                path = (float(bar.low), float(bar.high)) if c >= o else (float(bar.high), float(bar.low))
+                for px in (*path, c):
+                    poll(bar, px)
                 unclosed = bar
 
                 # Step 4: Track equity (cash + market value of the open position)
@@ -783,12 +812,15 @@ class BacktestEngine:
                 ))
 
         # --- Calculate metrics ---
-        return self._calculate_metrics(
+        result = self._calculate_metrics(
             trade_log=trade_log,
             equity_curve=equity_curve,
             max_drawdown=max_drawdown,
             final_balance=paper_engine.balance,
         )
+        if algo_engine is not None and algo_engine.halted_at is not None:
+            result.halted_at = datetime.fromtimestamp(algo_engine.halted_at, tz=timezone.utc)
+        return result
 
     # ------------------------------------------------------------------
     # Metrics calculation
@@ -834,7 +866,13 @@ class BacktestEngine:
         avg_loser_pct = total_loss / (self._initial_balance * len(losers)) if losers else 0.0
 
         # Calmar Ratio
-        calmar_ratio = total_return_pct / max_drawdown if max_drawdown > 0 else float("inf")
+        # Annualized return (CAGR) over the simulated period / max drawdown
+        years = (len(equity_curve) - 1) * self._timeframe_to_minutes() / 525_600
+        if years > 0 and final_balance > 0:
+            cagr = (final_balance / self._initial_balance) ** (1 / years) - 1
+        else:
+            cagr = total_return_pct
+        calmar_ratio = cagr / max_drawdown if max_drawdown > 0 else float("inf")
 
         # Absolute max drawdown in USD & Recovery Factor
         peak = self._initial_balance
@@ -846,7 +884,8 @@ class BacktestEngine:
             if dd_usd > max_dd_usd:
                 max_dd_usd = dd_usd
                 
-        recovery_factor = total_profit / max_dd_usd if max_dd_usd > 0 else float("inf")
+        net_profit = final_balance - self._initial_balance
+        recovery_factor = net_profit / max_dd_usd if max_dd_usd > 0 else float("inf")
 
         # Max consecutive losses
         current_losses = 0
@@ -981,6 +1020,6 @@ class BacktestEngine:
         mapping = {
             "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
             "1h": 60, "2h": 120, "4h": 240, "6h": 360,
-            "8h": 480, "12h": 720, "1d": 1440,
+            "8h": 480, "12h": 720, "1d": 1440, "1w": 10080,
         }
         return mapping.get(self._timeframe, 60)

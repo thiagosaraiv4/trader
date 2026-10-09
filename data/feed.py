@@ -206,6 +206,11 @@ class CcxtProvider:
         self._exchange: Any = None
         self._exchange_id: str = ""
 
+    @property
+    def exchange_id(self) -> str:
+        """Exchange currently serving prices ("" before the first snapshot)."""
+        return self._exchange_id
+
     def _ensure_exchange(self) -> Any:
         """Lazy-init the ccxt exchange instance with fallback chain."""
         if self._exchange is not None:
@@ -227,7 +232,8 @@ class CcxtProvider:
 
                 exchange = exchange_class({
                     "enableRateLimit": True,
-                    "options": {"defaultType": "spot"},
+                    # Spot markets only: fewer endpoints to load, fewer failures
+                    "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}},
                 })
 
                 # Probe connectivity by loading markets
@@ -263,10 +269,10 @@ class CcxtProvider:
         limit: int,
     ) -> pd.DataFrame:
         """Fetch OHLCV via ccxt (auto-selected exchange)."""
-        exchange = self._ensure_exchange()
+        loop = asyncio.get_running_loop()
+        exchange = await loop.run_in_executor(None, self._ensure_exchange)
 
         # ccxt returns list of [timestamp_ms, o, h, l, c, v]
-        loop = asyncio.get_running_loop()
         try:
             raw = await loop.run_in_executor(
                 None,
@@ -275,7 +281,7 @@ class CcxtProvider:
         except Exception as exc:
             # Reset cached exchange so fallback chain re-runs on next call
             self._log.warning(
-                f"{self._exchange_id} fetch failed — resetting for fallback",
+                f"{self._exchange_id} snapshot failed — fallback chain on next attempt",
                 extra={"error": str(exc)[:120]},
             )
             self._exchange = None
@@ -301,22 +307,23 @@ class CcxtProvider:
         timeframe: str,
     ) -> BarData:
         """Fetch the latest (forming) bar."""
-        exchange = self._ensure_exchange()
-
         loop = asyncio.get_running_loop()
+        exchange = await loop.run_in_executor(None, self._ensure_exchange)
+
         try:
             raw = await loop.run_in_executor(
                 None,
                 lambda: exchange.fetch_ohlcv(symbol, timeframe, limit=2),
             )
         except Exception as exc:
-            # Reset cached exchange so fallback chain re-runs on next call
+            # Keep the same exchange: switching venues between polls would mix
+            # another exchange's prices into indicators built from this one.
+            # A switch only happens on a snapshot (fetch_ohlcv), which
+            # re-initializes the indicators.
             self._log.warning(
-                f"{self._exchange_id} fetch failed — resetting for fallback",
+                f"{self._exchange_id} poll failed — retrying the same exchange",
                 extra={"error": str(exc)[:120]},
             )
-            self._exchange = None
-            self._exchange_id = ""
             raise
 
         if not raw or len(raw) < 2:
@@ -418,6 +425,11 @@ class DataFeedManager:
         self._stop_event.clear()
         self._task = asyncio.create_task(self._run_loop())
         self._log.info("Feed started")
+
+    @property
+    def source(self) -> str:
+        """Where prices come from (exchange id for ccxt, else provider name)."""
+        return getattr(self._provider, "exchange_id", "") or type(self._provider).__name__
 
     def request_resync(self) -> None:
         """Re-fetch the snapshot after the current poll (e.g. bars were missed)."""
