@@ -47,6 +47,12 @@ from data.feed import DataFeedManager
 # Structured JSON Logger (headless-specific)
 # ---------------------------------------------------------------------------
 
+# Attributes every LogRecord has; anything else on a record came from extra={...}
+_STANDARD_RECORD_ATTRS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+) | {"message", "asctime"}
+
+
 class _HeadlessJsonFormatter(logging.Formatter):
     """Emit each log record as a single-line JSON object."""
 
@@ -58,18 +64,9 @@ class _HeadlessJsonFormatter(logging.Formatter):
             "level": record.levelname,
             "event": record.getMessage(),
         }
-        # Merge extra fields
-        for key in (
-            "component", "symbol", "side", "price", "qty", "commission",
-            "balance", "pnl", "pnl_pct", "bars", "indicators",
-            "trades", "win_rate", "profit_factor", "drawdown",
-            "return_pct", "streak", "reason", "elapsed",
-            "from_state", "to_state", "error", "provider", "strategy",
-            "retry", "backoff_sec", "consecutive_errors", "position", "equity",
-            "halted", "exchange",
-        ):
-            val = getattr(record, key, None)
-            if val is not None:
+        # Every extra field (a fixed list silently dropped new ones)
+        for key, val in record.__dict__.items():
+            if key not in _STANDARD_RECORD_ATTRS and key not in entry and val is not None:
                 entry[key] = val
         if record.exc_info and record.exc_info[1] is not None:
             entry["exception"] = self.formatException(record.exc_info)
