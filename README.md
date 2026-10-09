@@ -149,6 +149,21 @@ muda nada. Escolha pela maior queda (`dd`) que você aguentaria sem desligar o r
 `risk_pct` arquiva a sessão ao vivo e começa uma nova (`sudo systemctl restart trading-bot`).
 Na `ma_cross_v3` (posição fixa, `risk_sizing: false`) o parâmetro não se aplica.
 
+### Operar em segundos? Estudo do "muro das taxas"
+
+Antes de qualquer robô de segundos, `run_seconds_study.py` mede com candles **reais de 1 segundo**
+da Binance (arquivo público data.binance.vision, sem chave de API) quanto o BTC anda em 1 s, 5 s,
+30 s, 1 min, 15 min, quantas vezes esse movimento cobre a taxa de ida+volta, que taxa de acerto de
+direção seria preciso para empatar e quanto acertam os sinais mais simples (momento/reversão).
+
+```bash
+python run_seconds_study.py                    # últimos 7 dias (máx. 14), taxas 0,1 / 0,075 / 0,02 / 0% por lado
+python run_seconds_study.py --fees 0.1,0       # só essas taxas
+```
+
+Não negocia nada. Baixa ~3 MB por dia para `backtest_cache/vision/`. Rode na VM (a Binance
+bloqueia servidores nos EUA).
+
 ### Rodar comparação Live vs Backtest
 
 ```bash
