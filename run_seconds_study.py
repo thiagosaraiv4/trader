@@ -38,6 +38,9 @@ _DEFAULT_FEES = (0.1, 0.075, 0.02, 0.0)        # % per side
 _DEFAULT_HORIZONS = (1, 2, 5, 10, 30, 60, 300, 900)
 _MAX_DAYS = 14                                  # ~190 MB peak: leaves room for the live bot on a 1 GB VM
 _W = 11                                         # width of each fee column
+_MIN_TRADES = 30                                # fewer independent trades: no noise estimate
+_MAX_IDLE = 0.30                                # above this share of no-trade seconds, stale
+                                                # prices fake reversal edges
 
 
 def _parse_list(value: str, kind: type) -> tuple:
@@ -125,23 +128,24 @@ def _horizon(blocks: list[np.ndarray], h: int, rts: list[float]) -> dict | None:
     f, fl = np.concatenate(fut), np.concatenate(fut_late)
     half = len(s) // 2
     # Side from the first half only: choosing it on the data it is scored on
-    # turns pure noise into an "edge"
+    # turns pure noise into an "edge". Judged on the 1 s late entry, the
+    # trade that can actually be made (bid-ask bounce vanishes there)
     first = s[:half] != 0
-    side = 1.0 if (not first.any() or np.mean(s[:half][first] * f[:half][first]) >= 0) else -1.0
+    side = 1.0 if (not first.any() or np.mean(s[:half][first] * fl[:half][first]) >= 0) else -1.0
     s2, f2, fl2 = side * s[half:], f[half:], fl[half:]
     m = s2 != 0
-    moved = m & (f2 != 0)
+    moved = m & (fl2 != 0)
     # Noise: 3 standard errors over non-overlapping trades (one every h
     # seconds). 3, not 2: the conclusion picks the best of several horizons,
     # and at 2 a pure random walk would show an "edge" ~1 run in 6
     pnl = (s2 * fl2)[::h]
     pnl = pnl[s2[::h] != 0]
-    se = float(np.std(pnl) / math.sqrt(len(pnl))) if len(pnl) > 1 else math.inf
+    se = float(np.std(pnl, ddof=1) / math.sqrt(len(pnl))) if len(pnl) >= _MIN_TRADES else math.inf
     return {
         "mean": float(a.mean()), "median": float(np.median(a)),
         "p90": float(np.quantile(a, 0.9)), "cover": [float(np.mean(a > rt)) for rt in rts],
         "signal": "momento" if side > 0 else "reversão",
-        "hit": float(np.mean(np.sign(f2[moved]) == s2[moved])) if moved.any() else 0.5,
+        "hit": float(np.mean(np.sign(fl2[moved]) == s2[moved])) if moved.any() else 0.5,
         "gross": float(np.mean(s2[m] * f2[m])) if m.any() else 0.0,
         "gross_late": float(np.mean(s2[m] * fl2[m])) if m.any() else 0.0,
         "noise": 3 * se,
@@ -204,6 +208,9 @@ def main() -> None:
     print(f"[*] {len(loaded)} dia(s), {total:,} segundos; {idle:,} sem negócio "
           f"({idle / total:.1%}) repetem o último preço.")
     print(f"[*] Cache: {CACHE_DIR}")
+    if idle / total > _MAX_IDLE:
+        print(f"[!] Mais de {_MAX_IDLE:.0%} dos segundos sem negócio: preço parado distorce os sinais;"
+              " nenhum lucro será dado como confiável.")
 
     fees = sorted(set(args.fees), reverse=True)
     rts = [2 * f / 100 for f in fees]                       # round trip, fraction
@@ -233,31 +240,35 @@ def main() -> None:
     print("   ('impossível' = nem acertando 100% das direções o movimento médio paga a taxa)")
 
     print("\n3) O sinal mais simples: seguir (momento) ou inverter (reversão) o movimento dos")
-    print("   últimos N segundos. Lado escolhido na 1ª metade do período, medido na 2ª.")
-    print("   À direita, resultado líquido por trade entrando 1 s atrasado, por taxa:")
-    print(f"   {'horizonte':>9} {'sinal':>9} {'acerto':>7} {'bruto':>9} {'1s atraso':>10} "
+    print("   últimos N segundos. Lado escolhido na 1ª metade do período, medido na 2ª,")
+    print("   entrando 1 s depois do sinal. À direita, resultado líquido por trade, por taxa:")
+    print(f"   {'horizonte':>9} {'sinal':>9} {'acerto':>7} {'sem atraso':>10} {'1s atraso':>10} "
           f"{'ruído ±':>9} |{fee_hdr}")
     for h, s in stats:
         net = "".join(f"{s['gross_late'] - rt:>+{_W}.4%}" for rt in rts)
-        print(f"   {_fmt_h(h):>9} {s['signal']:>9} {s['hit']:>7.1%} {s['gross']:>+9.4%} "
-              f"{s['gross_late']:>+10.4%} {s['noise']:>9.4%} |{net}")
-    print("   (bruto = ganho médio por trade antes das taxas; '1s atraso' = entrando 1 segundo")
-    print("    depois, mais perto do real com ~0,26 s de ida e volta até a Binance; 'ruído' =")
-    print("    margem estatística: um bruto menor que ela pode ser só sorte.)")
+        noise = f"{'∞':>9}" if math.isinf(s["noise"]) else f"{s['noise']:>9.4%}"
+        print(f"   {_fmt_h(h):>9} {s['signal']:>9} {s['hit']:>7.1%} {s['gross']:>+10.4%} "
+              f"{s['gross_late']:>+10.4%} {noise} |{net}")
+    print("   (ganho médio por trade antes das taxas: 'sem atraso' é impossível na prática;")
+    print("    '1s atraso' = entrando 1 segundo depois, mais perto do real com ~0,26 s de ida")
+    print("    e volta até a Binance. 'ruído' = margem estatística: um resultado menor que ela")
+    print(f"    pode ser só sorte; ∞ = menos de {_MIN_TRADES} trades independentes, não dá para medir.)")
 
     print("\n" + "=" * 78)
     print("CONCLUSÃO")
     for f, rt in zip(fees, rts):
-        # Best net result, preferring horizons whose edge clears the noise
-        h, s = max(stats, key=lambda hs: (hs[1]["gross_late"] - rt > 0
-                                          and hs[1]["gross_late"] > hs[1]["noise"],
+        # Best net result, preferring horizons whose NET result clears the noise
+        h, s = max(stats, key=lambda hs: (hs[1]["gross_late"] - rt > hs[1]["noise"],
                                           hs[1]["gross_late"] - rt))
         net = s["gross_late"] - rt
         if net <= 0:
             verdict = f"nenhum sinal simples lucra (o melhor: {net:+.4%}/trade em {_fmt_h(h)})"
-        elif s["gross_late"] <= s["noise"]:
+        elif net <= s["noise"]:
             verdict = (f"lucro aparente de {net:+.4%}/trade em {_fmt_h(h)} está dentro do ruído "
                        "(pode ser sorte)")
+        elif idle / total > _MAX_IDLE:
+            verdict = (f"lucro aparente de {net:+.4%}/trade em {_fmt_h(h)} não é confiável: "
+                       f"{idle / total:.0%} dos segundos sem negócio (preço parado engana)")
         else:
             verdict = (f"{net:+.4%}/trade em {_fmt_h(h)} acima do ruído — vale investigar "
                        "(ainda sem spread e fila de ordens reais)")

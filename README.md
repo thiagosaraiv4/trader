@@ -162,7 +162,10 @@ python run_seconds_study.py --fees 0.1,0       # só essas taxas
 ```
 
 Não negocia nada. Baixa ~3 MB por dia para `backtest_cache/vision/`. Rode na VM (a Binance
-bloqueia servidores nos EUA).
+bloqueia servidores nos EUA). O sinal de cada horizonte é escolhido na 1ª metade do período e
+medido na 2ª, entrando 1 s atrasado, com margem de ruído estatístico — um "lucro" dentro dela
+pode ser sorte. Os dados da Binance Vision são licenciados para estudo/backtest pessoal, não
+para gerar ordens ao vivo.
 
 ### Rodar comparação Live vs Backtest
 

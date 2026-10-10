@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from datetime import date
 from pathlib import Path
 
@@ -98,13 +99,14 @@ def download_day(symbol: str, day: date, cache_dir: Path = CACHE_DIR) -> Path | 
     if body is None:
         return None
     checksum = _get(url + ".CHECKSUM")
-    if checksum:
-        expected = checksum.decode("ascii", "replace").split()[0].lower()
+    fields = checksum.decode("ascii", "replace").split() if checksum else []
+    if fields:
+        expected = fields[0].lower()
         if hashlib.sha256(body).hexdigest() != expected:
             raise VisionError(f"{path.name}: checksum mismatch (download corrupted?)")
     try:
         bad_member = zipfile.ZipFile(io.BytesIO(body)).testzip()
-    except zipfile.BadZipFile as e:
+    except (zipfile.BadZipFile, zlib.error, EOFError) as e:
         raise VisionError(f"{path.name}: invalid zip") from e
     if bad_member is not None:
         raise VisionError(f"{path.name}: corrupt zip ({bad_member})")
@@ -136,7 +138,7 @@ def read_day(path: Path) -> pd.DataFrame:
         out = df[["open", "high", "low", "close", "volume", "trades"]].astype(float)
     except VisionError:
         raise
-    except (zipfile.BadZipFile, IndexError, KeyError, ValueError, OSError) as e:
+    except (zipfile.BadZipFile, zlib.error, EOFError, IndexError, KeyError, ValueError, OSError) as e:
         raise VisionError(f"{path.name}: unreadable ({e})") from e
     # Microseconds since 2025 (spot); milliseconds before
     unit = "us" if ts.iloc[0] > 10**14 else "ms"
