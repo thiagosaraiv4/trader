@@ -8,19 +8,23 @@ das taxas":
   1. Quanto o preço anda em 1 s, 5 s, 30 s, 1 min, 15 min...
   2. Que fração desses movimentos cobre a taxa de ida+volta
   3. Que taxa de acerto de direção seria preciso para empatar
-  4. Quanto acertam os sinais mais simples (momento / reversão)
+  4. Quanto rendem os sinais mais simples (momento / reversão), com o lado
+     escolhido na 1ª metade do período e medido na 2ª (fora da amostra)
 
 Uso (rode na VM — a Binance bloqueia servidores nos EUA):
     python run_seconds_study.py                      # últimos 7 dias, BTCUSDT
     python run_seconds_study.py --days 3 --end 2026-10-01
     python run_seconds_study.py --fees 0.1,0.075,0   # taxas por lado, em %
 
-Baixa um arquivo por dia (~2-4 MB) e guarda em backtest_cache/vision/.
-Não negocia nada; só mede.
+Baixa um arquivo por dia (~2-3 MB) e guarda em backtest_cache/vision/.
+Não negocia nada; só mede (os dados da Binance Vision são licenciados para
+estudo/backtest pessoal, não para gerar ordens ao vivo).
 """
 from __future__ import annotations
 
 import argparse
+import math
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
@@ -28,7 +32,7 @@ import numpy as np
 import pandas as pd
 
 from core.config import AppConfig
-from data.binance_vision import CACHE_DIR, VisionError, download_day, read_day
+from data.binance_vision import CACHE_DIR, VisionError, load_day
 
 _DEFAULT_FEES = (0.1, 0.075, 0.02, 0.0)        # % per side
 _DEFAULT_HORIZONS = (1, 2, 5, 10, 30, 60, 300, 900)
@@ -53,47 +57,57 @@ def _parse_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"data inválida {value!r} (use AAAA-MM-DD)")
 
 
-def _load(symbol: str, days: list[date]) -> list[tuple[date, pd.Series]]:
-    """Close of every second with trades, per available day."""
+def _vision_symbol(value: str) -> str:
+    """'BTC/USDT', 'btc-usdt', 'BTC/USDT:USDT' → 'BTCUSDT' (archive format)."""
+    return re.sub(r"[^A-Z0-9]", "", value.split(":")[0].upper())
+
+
+def _load(symbol: str, days: list[date]) -> list[tuple[date, pd.DataFrame]]:
+    """Close and trade count of every second, per available day."""
     loaded = []
     for i, day in enumerate(days, 1):
         print(f"\r[*] Baixando {symbol} 1s {day:%Y-%m-%d} ({i}/{len(days)})", end="", flush=True)
-        path = download_day(symbol, day)
-        if path is None:
+        df = load_day(symbol, day)
+        if df is None:
             print(f"\n[i] {day:%Y-%m-%d} não disponível na Binance (ainda não publicado?) — pulado")
             continue
-        loaded.append((day, read_day(path)["close"]))
+        loaded.append((day, df[["close", "trades"]]))
     print()
     return loaded
 
 
-def _blocks(loaded: list[tuple[date, pd.Series]]) -> tuple[list[np.ndarray], int, int]:
+def _blocks(loaded: list[tuple[date, pd.DataFrame]]) -> tuple[list[np.ndarray], int, int]:
     """
     Closes on a full 1-second grid, one array per run of consecutive days
-    (a missing day must not become a flat stretch). Seconds without trades
-    repeat the last close. Returns (blocks, seconds, filled seconds).
+    (a missing day must not become a flat stretch). Missing seconds repeat
+    the last close. Returns (blocks, seconds, seconds without trades).
     """
-    runs: list[list[pd.Series]] = []
+    runs: list[list[pd.DataFrame]] = []
     prev: date | None = None
-    for day, closes in loaded:
+    for day, df in loaded:
         if prev is None or day != prev + timedelta(days=1):
             runs.append([])
-        runs[-1].append(closes)
+        runs[-1].append(df)
         prev = day
-    blocks, total, filled = [], 0, 0
+    blocks, total, idle = [], 0, 0
     for run in runs:
-        closes = pd.concat(run)
-        grid = pd.date_range(closes.index[0], closes.index[-1], freq="1s")
-        blocks.append(closes.reindex(grid).ffill().to_numpy())
+        df = pd.concat(run)
+        df = df[~df.index.duplicated()]
+        grid = pd.date_range(df.index[0], df.index[-1], freq="1s")
+        df = df.reindex(grid)
+        blocks.append(df["close"].ffill().to_numpy())
         total += len(grid)
-        filled += len(grid) - len(closes)
-    return blocks, total, filled
+        # Filler rows (trades=0) and seconds absent from the file
+        idle += int((df["trades"].fillna(0) == 0).sum())
+    return blocks, total, idle
 
 
 def _horizon(blocks: list[np.ndarray], h: int, rts: list[float]) -> dict | None:
     """
     Stats of h-second returns, share of them above each round-trip fee in
-    `rts`, and the simplest signals over that horizon.
+    `rts`, and the simplest signal over that horizon: follow (momentum) or
+    invert (reversal) the move of the last h seconds. The side is picked on
+    the first half of the pairs and measured on the second half.
     """
     fut_all, past, fut, fut_late = [], [], [], []
     for c in blocks:
@@ -107,26 +121,44 @@ def _horizon(blocks: list[np.ndarray], h: int, rts: list[float]) -> dict | None:
     if not fut_all:
         return None
     a = np.abs(np.concatenate(fut_all))
-    p, f, fl = np.concatenate(past), np.concatenate(fut), np.concatenate(fut_late)
-    s = np.sign(p)
-    m = s != 0
-    gross = float(np.mean(s[m] * f[m])) if m.any() else 0.0
-    gross_late = float(np.mean(s[m] * fl[m])) if m.any() else 0.0
-    moved = m & (f != 0)
-    hit = float(np.mean(np.sign(f[moved]) == s[moved])) if moved.any() else 0.5
-    # Use whichever of momentum / reversal did better (chosen in-sample: optimistic)
-    label = "momento"
-    if gross < 0:
-        label, gross, gross_late, hit = "reversão", -gross, -gross_late, 1 - hit
+    s = np.sign(np.concatenate(past))
+    f, fl = np.concatenate(fut), np.concatenate(fut_late)
+    half = len(s) // 2
+    # Side from the first half only: choosing it on the data it is scored on
+    # turns pure noise into an "edge"
+    first = s[:half] != 0
+    side = 1.0 if (not first.any() or np.mean(s[:half][first] * f[:half][first]) >= 0) else -1.0
+    s2, f2, fl2 = side * s[half:], f[half:], fl[half:]
+    m = s2 != 0
+    moved = m & (f2 != 0)
+    # Noise: 3 standard errors over non-overlapping trades (one every h
+    # seconds). 3, not 2: the conclusion picks the best of several horizons,
+    # and at 2 a pure random walk would show an "edge" ~1 run in 6
+    pnl = (s2 * fl2)[::h]
+    pnl = pnl[s2[::h] != 0]
+    se = float(np.std(pnl) / math.sqrt(len(pnl))) if len(pnl) > 1 else math.inf
     return {
-        "n": len(a), "mean": float(a.mean()), "median": float(np.median(a)),
+        "mean": float(a.mean()), "median": float(np.median(a)),
         "p90": float(np.quantile(a, 0.9)), "cover": [float(np.mean(a > rt)) for rt in rts],
-        "signal": label, "hit": hit, "gross": gross, "gross_late": gross_late,
+        "signal": "momento" if side > 0 else "reversão",
+        "hit": float(np.mean(np.sign(f2[moved]) == s2[moved])) if moved.any() else 0.5,
+        "gross": float(np.mean(s2[m] * f2[m])) if m.any() else 0.0,
+        "gross_late": float(np.mean(s2[m] * fl2[m])) if m.any() else 0.0,
+        "noise": 3 * se,
     }
 
 
 def _fmt_h(h: int) -> str:
     return f"{h // 60} min" if h >= 60 and h % 60 == 0 else f"{h} s"
+
+
+def _break_even(rt: float, mean_move: float) -> float:
+    """Direction accuracy needed to break even (inf = impossible)."""
+    if rt == 0:
+        return 0.5
+    if mean_move == 0:
+        return math.inf
+    return 0.5 + rt / (2 * mean_move)
 
 
 def main() -> None:
@@ -147,7 +179,7 @@ def main() -> None:
     if any(h < 1 for h in args.horizons):
         parser.error("--horizons em segundos, a partir de 1")
 
-    symbol = args.symbol.replace("/", "").upper()
+    symbol = _vision_symbol(args.symbol)
     end = args.end or (datetime.now(timezone.utc).date() - timedelta(days=1))
     days = [end - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
 
@@ -158,14 +190,19 @@ def main() -> None:
         loaded = _load(symbol, days)
     except VisionError as e:
         print(f"\n[!] Falha no download: {e}")
-        print("    A Binance bloqueia servidores nos EUA (Codespaces); rode na VM.")
+        if e.status in (403, 451):
+            print("    Acesso bloqueado — a Binance bloqueia servidores nos EUA (Codespaces); rode na VM.")
+        else:
+            print("    Rode de novo: os dias já baixados ficam no cache.")
         sys.exit(1)
     if not loaded:
-        print("[!] Nenhum dia disponível no período.")
+        print(f"[!] Nenhum dia disponível no período. Confira o símbolo ({symbol}, formato da")
+        print("    Binance, ex.: BTCUSDT); o arquivo de cada dia sai por volta de 01:30-02:30 UTC")
+        print("    do dia seguinte.")
         sys.exit(1)
-    blocks, total, filled = _blocks(loaded)
-    print(f"[*] {len(loaded)} dia(s), {total:,} segundos; {filled:,} sem negócio "
-          f"({filled / total:.1%}) repetem o último preço.")
+    blocks, total, idle = _blocks(loaded)
+    print(f"[*] {len(loaded)} dia(s), {total:,} segundos; {idle:,} sem negócio "
+          f"({idle / total:.1%}) repetem o último preço.")
     print(f"[*] Cache: {CACHE_DIR}")
 
     fees = sorted(set(args.fees), reverse=True)
@@ -176,7 +213,7 @@ def main() -> None:
         print("[!] Dados curtos demais para esses horizontes.")
         sys.exit(1)
 
-    fee_hdr = "".join(f"{2 * f:>{_W - 1}.2f}%" for f in fees)
+    fee_hdr = "".join(f"{f'{2 * f:g}%':>{_W}}" for f in fees)
     print("\n1) Quanto o preço anda (|variação| entre agora e daqui a N) e, à direita,")
     print("   % das vezes que esse movimento cobre a taxa de ida+volta (compra + venda):")
     print(f"   {'horizonte':>9} {'médio':>9} {'mediana':>9} {'p90':>9} |{fee_hdr}")
@@ -190,35 +227,51 @@ def main() -> None:
     for h, s in stats:
         cells = ""
         for rt in rts:
-            need = 0.5 + rt / (2 * s["mean"])
+            need = _break_even(rt, s["mean"])
             cells += f"{'impossível':>{_W}}" if need > 1 else f"{need:>{_W}.1%}"
         print(f"   {_fmt_h(h):>9} |{cells}")
     print("   ('impossível' = nem acertando 100% das direções o movimento médio paga a taxa)")
 
-    print("\n3) O sinal mais simples: seguir (momento) ou inverter (reversão) o movimento")
-    print("   dos últimos N segundos. À direita, resultado líquido por trade, por taxa:")
-    print(f"   {'horizonte':>9} {'sinal':>9} {'acerto':>7} {'bruto':>9} {'1s atraso':>10} |{fee_hdr}")
+    print("\n3) O sinal mais simples: seguir (momento) ou inverter (reversão) o movimento dos")
+    print("   últimos N segundos. Lado escolhido na 1ª metade do período, medido na 2ª.")
+    print("   À direita, resultado líquido por trade entrando 1 s atrasado, por taxa:")
+    print(f"   {'horizonte':>9} {'sinal':>9} {'acerto':>7} {'bruto':>9} {'1s atraso':>10} "
+          f"{'ruído ±':>9} |{fee_hdr}")
     for h, s in stats:
-        net = "".join(f"{s['gross'] - rt:>+{_W}.4%}" for rt in rts)
+        net = "".join(f"{s['gross_late'] - rt:>+{_W}.4%}" for rt in rts)
         print(f"   {_fmt_h(h):>9} {s['signal']:>9} {s['hit']:>7.1%} {s['gross']:>+9.4%} "
-              f"{s['gross_late']:>+10.4%} |{net}")
-    print("   (bruto = ganho médio por trade antes das taxas, entrando no fechamento do segundo;")
-    print("    '1s atraso' = o mesmo entrando 1 segundo depois. O lado momento/reversão foi")
-    print("    escolhido olhando estes mesmos dados, então o número é otimista.)")
+              f"{s['gross_late']:>+10.4%} {s['noise']:>9.4%} |{net}")
+    print("   (bruto = ganho médio por trade antes das taxas; '1s atraso' = entrando 1 segundo")
+    print("    depois, mais perto do real com ~0,26 s de ida e volta até a Binance; 'ruído' =")
+    print("    margem estatística: um bruto menor que ela pode ser só sorte.)")
 
     print("\n" + "=" * 78)
     print("CONCLUSÃO")
     for f, rt in zip(fees, rts):
-        best = max(stats, key=lambda hs: hs[1]["gross"] - rt)
-        best_net = f"melhor sinal simples: {best[1]['gross'] - rt:+.4%}/trade ({_fmt_h(best[0])})"
-        if rt == 0:
-            print(f"  Sem taxa: {best_net}.")
-            continue
-        first = next((h for h, s in stats if s["mean"] > rt), None)
-        where = (f"só a partir de {_fmt_h(first)}" if first else
-                 f"em nenhum horizonte até {_fmt_h(stats[-1][0])}")
-        print(f"  Taxa {f:g}% por lado: o movimento médio cobre a taxa {where};")
-        print(f"  {'':>{len(f'Taxa {f:g}% por lado: ')}}{best_net}.")
+        # Best net result, preferring horizons whose edge clears the noise
+        h, s = max(stats, key=lambda hs: (hs[1]["gross_late"] - rt > 0
+                                          and hs[1]["gross_late"] > hs[1]["noise"],
+                                          hs[1]["gross_late"] - rt))
+        net = s["gross_late"] - rt
+        if net <= 0:
+            verdict = f"nenhum sinal simples lucra (o melhor: {net:+.4%}/trade em {_fmt_h(h)})"
+        elif s["gross_late"] <= s["noise"]:
+            verdict = (f"lucro aparente de {net:+.4%}/trade em {_fmt_h(h)} está dentro do ruído "
+                       "(pode ser sorte)")
+        else:
+            verdict = (f"{net:+.4%}/trade em {_fmt_h(h)} acima do ruído — vale investigar "
+                       "(ainda sem spread e fila de ordens reais)")
+        label = "Sem taxa" if rt == 0 else f"Taxa {f:g}% por lado"
+        print(f"  {label}: {verdict}.")
+        if rt > 0:
+            first = next((hh for hh, ss in stats if ss["mean"] > rt), None)
+            where = (f"cobre essa taxa só a partir de {_fmt_h(first)}" if first else
+                     f"não cobre essa taxa em nenhum horizonte até {_fmt_h(stats[-1][0])}")
+            print(f"  {'':>{len(label) + 2}}O movimento médio {where}.")
+    if 0 in rts:
+        print("  ('Sem taxa' é hipotético: no BTC/USDT a taxa é 0.1% por lado; taxa zero só")
+        print("  existe para ordens maker em pares promocionais, e elas só executam quando")
+        print("  alguém cruza o seu preço — muitas vezes logo antes de o preço ir contra.)")
     print("  Preços = último negócio de cada segundo. Na prática ainda há o spread")
     print("  (BTC/USDT: ~0.01 USD, desprezível) e a latência da VM até a Binance.")
     print("=" * 78)
