@@ -38,3 +38,6 @@ archive/
 # Paper maker bot (maker_bot.py)
 maker_trades.csv
 maker.lock
+
+# Deep-research working notes (the final report goes to reports/)
+research_notes/
