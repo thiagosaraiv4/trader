@@ -188,7 +188,17 @@ tail -f logs/maker.log                        # fills, idas e voltas, heartbeat 
 sudo systemctl disable --now maker-bot        # desligar
 ```
 
-Os trades ficam em `maker_trades.csv`. Deixe rodar 1–2 semanas antes de concluir. A taxa maker
+Rodam **4 versões ao mesmo tempo, sobre os mesmos dados ao vivo**, para comparar de forma justa:
+
+| versão | o que muda |
+|---|---|
+| `base` | compra no melhor preço de compra; stop 0,2% ou 5 min, a mercado |
+| `filtro` | só compra se a fila de compra ≥ fila de venda e o preço não caiu nos últimos 10 s |
+| `saida_maker` | sai com ordem limitada (sem taxa): após 30 s a venda desce até o melhor preço de venda; stop a mercado só em 0,5% |
+| `filtro+maker` | as duas mudanças juntas |
+
+Os trades ficam em `maker_trades.csv` (coluna `variant`); um arquivo da versão anterior, sem
+essa coluna, é movido para `maker_trades_v1.csv`. Deixe rodar 1–2 semanas antes de concluir. A taxa maker
 zero do BTC/FDUSD é promocional ("até segunda ordem"); confira antes de qualquer teste real.
 
 ### Rodar comparação Live vs Backtest

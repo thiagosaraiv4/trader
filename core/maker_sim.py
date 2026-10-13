@@ -30,6 +30,7 @@ right before the price drops — the classic way market makers lose.
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -59,6 +60,7 @@ class RoundTrip:
     fees: float
     pnl: float                  # net of fees, quote currency
     markouts: dict[int, float] = field(default_factory=dict)  # s -> mid move / fill price
+    variant: str = "base"
 
 
 class MakerSim:
@@ -72,9 +74,16 @@ class MakerSim:
         min_requote_sec: float = 0.5,
         stop_pct: float = 0.002,
         max_hold_sec: float = 300.0,
+        entry_filter: bool = False,
+        momentum_sec: float = 10.0,
+        exit_mode: str = "stop",
+        patience_sec: float = 30.0,
+        hard_stop_pct: float = 0.005,
         on_round_trip: Callable[[RoundTrip], None] | None = None,
         on_fill: Callable[[str, float, float, float], None] | None = None,
+        name: str = "base",
     ) -> None:
+        self.name = name
         self.notional = notional
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
@@ -83,10 +92,26 @@ class MakerSim:
         self.min_requote = min_requote_sec
         self.stop_pct = stop_pct
         self.max_hold = max_hold_sec
+        # Entry filter: only bid when the top of the book leans to buyers
+        # (bid size >= ask size) and the mid has not fallen over the last
+        # momentum_sec (short-term momentum continues, see run_seconds_study)
+        self.entry_filter = entry_filter
+        self.momentum_sec = momentum_sec
+        self._mids: deque[tuple[float, float]] = deque()
+        # exit_mode "stop":  taker exit at stop_pct or after max_hold_sec
+        # exit_mode "maker": no fee — after patience_sec (or once the mid is
+        #   below the entry) the ask follows the best ask even below the entry;
+        #   taker exit only at hard_stop_pct
+        if exit_mode not in ("stop", "maker"):
+            raise ValueError(f"exit_mode {exit_mode!r}")
+        self.exit_mode = exit_mode
+        self.patience = patience_sec
+        self.hard_stop_pct = hard_stop_pct
         self._on_round_trip = on_round_trip
         self._on_fill = on_fill
 
         self.bid = self.ask = math.nan
+        self._now = 0.0
         self.bid_size = self.ask_size = 0.0
         self.orders: list[Order] = []
         self._last_quote = -math.inf
@@ -120,8 +145,20 @@ class MakerSim:
         if math.isnan(self.bid) or math.isnan(self.ask) or self.bid >= self.ask:
             return None
         if self.flat:
-            return "buy", self.bid
-        return "sell", max(self.ask, self.entry_price + self.tick)
+            return ("buy", self.bid) if self._entry_ok() else None
+        floor = self.entry_price + self.tick
+        if self.exit_mode == "maker" and (
+                self._now - self.entry_time >= self.patience or self.mid < self.entry_price):
+            floor = -math.inf
+        return "sell", max(self.ask, floor)
+
+    def _entry_ok(self) -> bool:
+        if not self.entry_filter:
+            return True
+        if self.bid_size < self.ask_size:
+            return False
+        past = self._mids[0][1] if self._mids else self.mid
+        return self.mid >= past
 
     def _activate(self, now: float) -> None:
         """Orders reaching the book join the back of the queue at their price."""
@@ -145,6 +182,11 @@ class MakerSim:
         want = self._wanted()
         pending = [o for o in self.orders if o.cancel_at == math.inf]
         if want is None:
+            # Filter says stay out: pull a resting BUY (a SELL always stays)
+            if self.flat and pending and now - self._last_quote >= self.min_requote:
+                for o in pending:
+                    o.cancel_at = now + self.latency
+                self._last_quote = now
             return
         side, price = want
         if pending and pending[-1].side == side and pending[-1].price == price:
@@ -180,7 +222,7 @@ class MakerSim:
         fees = self.entry_fee + exit_fee
         # Same dict object: markouts still pending keep filling it
         trip = RoundTrip(self.entry_time, self.entry_price, now, price, self.qty,
-                         kind, fees, gross - fees, self._marks)
+                         kind, fees, gross - fees, self._marks, self.name)
         self.qty = 0.0
         self.round_trips.append(trip)
         self._awaiting.append(trip)
@@ -217,7 +259,10 @@ class MakerSim:
         if self.flat or math.isnan(self.bid):
             return
         kind = None
-        if self.mid <= self.entry_price * (1 - self.stop_pct):
+        if self.exit_mode == "maker":
+            if self.mid <= self.entry_price * (1 - self.hard_stop_pct):
+                kind = "stop"
+        elif self.mid <= self.entry_price * (1 - self.stop_pct):
             kind = "stop"
         elif now - self.entry_time >= self.max_hold:
             kind = "timeout"
@@ -239,12 +284,19 @@ class MakerSim:
 
     def on_book(self, now: float, bid: float, bid_size: float, ask: float, ask_size: float) -> None:
         self.bid, self.bid_size, self.ask, self.ask_size = bid, bid_size, ask, ask_size
+        self._now = now
+        if bid < ask:
+            self._mids.append((now, self.mid))
+            # Keep the oldest point at most momentum_sec old
+            while len(self._mids) > 1 and self._mids[1][0] <= now - self.momentum_sec:
+                self._mids.popleft()
         self._activate(now)
         self._check_marks(now)
         self._risk(now)
         self._quote(now)
 
     def on_trade(self, now: float, price: float, qty: float, taker_side: str) -> None:
+        self._now = now
         self._activate(now)
         for o in self._live(now):
             if o.side == "buy" and taker_side == "sell":
