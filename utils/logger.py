@@ -22,6 +22,32 @@ from typing import Any
 # Formatters
 # ---------------------------------------------------------------------------
 
+# Attributes every LogRecord has; anything else on a record came from extra={...}
+_STANDARD_RECORD_ATTRS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+) | {"message", "asctime"}
+
+
+class JsonLineFormatter(logging.Formatter):
+    """One JSON object per line with every extra field (headless bots' logs)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry: dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(
+                record.created, tz=timezone.utc
+            ).isoformat(),
+            "level": record.levelname,
+            "event": record.getMessage(),
+        }
+        # Every extra field (a fixed list silently dropped new ones)
+        for key, val in record.__dict__.items():
+            if key not in _STANDARD_RECORD_ATTRS and key not in entry and val is not None:
+                entry[key] = val
+        if record.exc_info and record.exc_info[1] is not None:
+            entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entry, default=str)
+
+
 class StructuredJsonFormatter(logging.Formatter):
     """Emit each log record as a single-line JSON object."""
 

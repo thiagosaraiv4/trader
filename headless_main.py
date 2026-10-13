@@ -41,37 +41,12 @@ from core.session import SESSION_PATH, load_session, save_session
 from core.strategy_params import InvalidParams, StrategyParams, load_params
 from core.types import BarData, FeedConfig, FeedStateChange, ProviderID, Timeframe
 from data.feed import DataFeedManager
+from utils.logger import JsonLineFormatter
 
 
 # ---------------------------------------------------------------------------
 # Structured JSON Logger (headless-specific)
 # ---------------------------------------------------------------------------
-
-# Attributes every LogRecord has; anything else on a record came from extra={...}
-_STANDARD_RECORD_ATTRS = frozenset(
-    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
-) | {"message", "asctime"}
-
-
-class _HeadlessJsonFormatter(logging.Formatter):
-    """Emit each log record as a single-line JSON object."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        entry: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(),
-            "level": record.levelname,
-            "event": record.getMessage(),
-        }
-        # Every extra field (a fixed list silently dropped new ones)
-        for key, val in record.__dict__.items():
-            if key not in _STANDARD_RECORD_ATTRS and key not in entry and val is not None:
-                entry[key] = val
-        if record.exc_info and record.exc_info[1] is not None:
-            entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(entry, default=str)
-
 
 def _configure_headless_logging() -> logging.Logger:
     """Configure root logger with JSON formatter for headless mode."""
@@ -80,7 +55,7 @@ def _configure_headless_logging() -> logging.Logger:
 
     handler = logging.StreamHandler(sys.stderr)
     handler.setLevel(logging.INFO)
-    handler.setFormatter(_HeadlessJsonFormatter())
+    handler.setFormatter(JsonLineFormatter())
     root.addHandler(handler)
 
     return logging.getLogger("headless")

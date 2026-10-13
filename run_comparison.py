@@ -115,7 +115,7 @@ def _verdict(metric: str, live: dict, bt: dict) -> tuple[str, str]:
 
 def compare_live_with_backtest() -> None:
     print("============================================================")
-    print("V3 LIVE vs BACKTEST - COMPARISON ENGINE (5-DAY)")
+    print("LIVE vs BACKTEST — mesmos candles, mesma estratégia")
     print("============================================================")
 
     cfg = AppConfig()

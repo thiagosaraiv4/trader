@@ -167,6 +167,30 @@ medido na 2ª, entrando 1 s atrasado, com margem de ruído estatístico — um "
 pode ser sorte. Os dados da Binance Vision são licenciados para estudo/backtest pessoal, não
 para gerar ordens ao vivo.
 
+### Robô maker de papel (BTC/FDUSD)
+
+O estudo acima mostra que, com taxa de 0,1%, operar em segundos é impossível. A exceção seria
+ordem **maker** (limitada, esperando no livro) em par com taxa maker zero, como o BTC/FDUSD.
+`maker_bot.py` testa isso **sem dinheiro e sem chave de API**: escuta o melhor preço e os negócios
+em tempo real (websocket) e simula uma ordem de compra no melhor preço de compra e, depois de
+executada, uma de venda no melhor preço de venda.
+
+A simulação é conservadora: a ordem entra no fim da fila do preço, só executa depois que essa
+fila for consumida (ou se o preço for atravessado), cada ação leva 0,3 s para valer (ida e volta
+São Paulo–Tóquio) e uma ordem que cruzaria o livro é recusada (post-only). Saída a mercado, com
+taxa taker de 0,1%, se o preço cair 0,2% ou após 5 minutos. Mede também a **seleção adversa**:
+para onde o preço vai 1, 5, 30 e 60 s depois de cada compra.
+
+```bash
+bash scripts/install_maker.sh                 # serviço maker-bot ao lado do trading-bot
+tail -f logs/maker.log                        # fills, idas e voltas, heartbeat a cada 5 min
+.venv/bin/python run_maker_report.py          # resumo: resultado, saídas, seleção adversa
+sudo systemctl disable --now maker-bot        # desligar
+```
+
+Os trades ficam em `maker_trades.csv`. Deixe rodar 1–2 semanas antes de concluir. A taxa maker
+zero do BTC/FDUSD é promocional ("até segunda ordem"); confira antes de qualquer teste real.
+
 ### Rodar comparação Live vs Backtest
 
 ```bash

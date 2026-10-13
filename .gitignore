@@ -34,3 +34,7 @@ backtest_cache/
 # VM install (scripts/install_vm.sh)
 .venv/
 archive/
+
+# Paper maker bot (maker_bot.py)
+maker_trades.csv
+maker.lock
