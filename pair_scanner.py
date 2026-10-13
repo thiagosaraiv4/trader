@@ -53,6 +53,7 @@ _STALE_SEC = 180
 # At most one sampled execution per pair/side/kind per this many seconds:
 # busy pairs would otherwise flood the markout queue with near-duplicates
 _MIN_EVENT_GAP = 0.5
+_MAX_GAP_SEC = 60
 
 log = logging.getLogger("scanner")
 
@@ -100,7 +101,8 @@ class Scanner:
         self.pairs = pairs
         self.stats: dict[str, PairStats] = {}
         self.book: dict[str, tuple[float, float]] = {}     # symbol -> (bid, ask)
-        self.last_sample: dict[str, int] = {}               # symbol -> last second sampled
+        # symbol -> (last second sampled, spread ticks, spread bp) at that time
+        self.last_sample: dict[str, tuple[int, int, float]] = {}
         self.last_event: dict[tuple[str, str, str], float] = {}
         # symbol -> horizon -> deque of (due, kind, side, price), in due order
         self.pending: dict[str, dict[int, deque]] = {}
@@ -137,11 +139,23 @@ class Scanner:
         st = self.stats[sym]
         mid = (bid + ask) / 2
         sec = int(now)
-        if self.last_sample.get(sym) != sec:
-            self.last_sample[sym] = sec
-            st.seconds += 1
-            st.spread_ticks[max(1, round((ask - bid) / st.tick))] += 1
-            st.spread_bps_sum += (ask - bid) / mid * 1e4
+        ticks = max(1, round((ask - bid) / st.tick))
+        bps = (ask - bid) / mid * 1e4
+        prev = self.last_sample.get(sym)
+        if prev is None:
+            self.last_sample[sym] = (sec, ticks, bps)
+        elif prev[0] != sec:
+            # Time-weighted: the previous spread held for every second since
+            # it was seen (a quiet pair updates its book rarely). Gaps longer
+            # than _MAX_GAP_SEC are a disconnect, not a quiet book.
+            held = min(sec - prev[0], _MAX_GAP_SEC)
+            st.seconds += held
+            st.spread_ticks[prev[1]] += held
+            st.spread_bps_sum += prev[2] * held
+            self.last_sample[sym] = (sec, ticks, bps)
+        else:
+            # Several updates in the same second: keep the latest
+            self.last_sample[sym] = (sec, ticks, bps)
         for h, q in self.pending[sym].items():
             while q and q[0][0] <= now:
                 _, kind, side, price = q.popleft()
@@ -272,6 +286,7 @@ class Scanner:
                     for q in qs.values():
                         q.clear()
                 self.book.clear()
+                self.last_sample.clear()
                 try:
                     await asyncio.wait_for(self.stop.wait(), timeout=backoff)
                 except asyncio.TimeoutError:

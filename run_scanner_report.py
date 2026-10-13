@@ -74,10 +74,10 @@ def main() -> None:
     updated = datetime.fromtimestamp(data.get("updated", 0), tz=timezone.utc)
     print(f"  Atualizado: {updated:%Y-%m-%d %H:%M} UTC. Valores em bp (0,01%); markout positivo = ganhou.\n")
     hdr = (f"  {'par':<11} {'horas':>5} {'spread':>6} {'spread':>7} {'exec/h':>7} | "
-           f"{'topo +1s':>8} {'+5s':>6} {'+30s':>6} | {'atrav. +5s':>10} {'taxa':>5} {'líquido':>8} | veredito")
+           f"{'topo +1s':>8} {'+5s':>6} {'+30s':>6} | {'atrav. +5s':>10} {'n':>5} {'taxa':>5} {'líquido':>8} | veredito")
     print(hdr)
     print(f"  {'':<11} {'':>5} {'ticks':>6} {'bp':>7} {'':>7} | {'(otimista)':>22} | {'(pessimista)':>10} "
-          f"{'maker':>5} {'':>8} |")
+          f"{'':>5} {'maker':>5} {'':>8} |")
     rows = []
     for sym, d in sorted(data.get("pairs", {}).items()):
         st = PairStats.from_dict(d)
@@ -100,9 +100,11 @@ def main() -> None:
         rows.append((net if not math.isnan(net) else -1e9, sym))
         fmt = lambda v, w: f"{'—':>{w}}" if math.isnan(v) else f"{v:>+{w}.2f}"
         print(f"  {sym:<11} {hours:>5.1f} {_median_ticks(st):>6.0f} {spread_bp:>7.2f} {ev_h:>7.0f} | "
-              f"{fmt(t[1], 8)} {fmt(t[5], 6)} {fmt(t[30], 6)} | {fmt(thr, 10)} {fee:>5.1f} {fmt(net, 8)} | {verdict}")
+              f"{fmt(t[1], 8)} {fmt(t[5], 6)} {fmt(t[30], 6)} | {fmt(thr, 10)} {n_thr:>5} {fee:>5.1f} "
+              f"{fmt(net, 8)} | {verdict}")
     print()
-    print("  spread: mediano em ticks e médio em bp. exec/h: negócios por hora no preço do topo.")
+    print("  spread: mediano em ticks e médio em bp (ponderados pelo tempo). exec/h: negócios por hora no")
+    print("  preço do topo. n: execuções pessimistas medidas (o veredito exige 100).")
     print("  topo (otimista): resultado de uma ordem passiva supondo que estávamos na frente da fila.")
     print("  atravessou (pessimista): só quando o negócio passou do nível — o que uma ordem no fim da")
     print("  fila consegue a ~260 ms. 'líquido' = pessimista +5 s menos a taxa maker. Só vale testar um")
