@@ -201,6 +201,23 @@ Os trades ficam em `maker_trades.csv` (coluna `variant`); um arquivo da versão 
 essa coluna, é movido para `maker_trades_v1.csv`. Deixe rodar 1–2 semanas antes de concluir. A taxa maker
 zero do BTC/FDUSD é promocional ("até segunda ordem"); confira antes de qualquer teste real.
 
+### Scanner de pares (onde um maker lento teria chance?)
+
+No BTC/FDUSD o spread é de 1 tick e a seleção adversa é ~1000× maior (ver
+`reports/Market making no varejo cripto.md`). `pair_scanner.py` mede outros pares ao mesmo
+tempo, só escutando: spread em ticks e bp, quantas execuções por hora uma ordem no topo teria
+e o resultado dela 1/5/30 s depois (otimista: qualquer negócio no topo; pessimista: só negócios
+que atravessam o nível, como numa ordem no fim da fila).
+
+```bash
+bash scripts/install_scanner.sh               # serviço pair-scanner (pares FDUSD e BRL padrão)
+.venv/bin/python run_scanner_report.py        # tabela; após 1-3 dias
+sudo systemctl disable --now pair-scanner     # desligar
+```
+
+Um par só vale o maker se o resultado **pessimista menos a taxa maker** for positivo e acima do
+ruído depois de pelo menos 1 dia.
+
 ### Rodar comparação Live vs Backtest
 
 ```bash

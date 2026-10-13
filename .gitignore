@@ -41,3 +41,7 @@ maker.lock
 
 # Deep-research working notes (the final report goes to reports/)
 research_notes/
+
+# Pair scanner (pair_scanner.py)
+scanner_stats.json
+scanner_stats.tmp
