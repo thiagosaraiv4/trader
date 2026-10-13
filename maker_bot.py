@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import gc
 import logging
 import signal
 import sys
@@ -126,13 +127,19 @@ class MakerBot:
 
     async def _exchange(self):
         import ccxt.pro as ccxtpro
+        # Spot markets only, and afterwards keep just our symbol: the full
+        # Binance market list costs ~100 MB on a 1 GB VM
         ex = ccxtpro.binance({"enableRateLimit": True, "newUpdates": True,
-                              "options": {"defaultType": "spot"}})
+                              "options": {"defaultType": "spot",
+                                          "fetchMarkets": {"types": ["spot"]}}})
         markets = await ex.load_markets()
         m = markets.get(self.symbol)
         if m is None or not m.get("active", True):
             await ex.close()
             raise SystemExit(f"{self.symbol} não está disponível na Binance")
+        ex.set_markets([m])
+        del markets
+        gc.collect()
         tick = float(m["precision"]["price"] or 0.01)
         return ex, tick
 
