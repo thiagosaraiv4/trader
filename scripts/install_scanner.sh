@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install_scanner.sh — Run the paper maker bot (pair_scanner.py) as a systemd
+# install_scanner.sh — Run the pair scanner (pair_scanner.py) as a systemd
 # service "pair-scanner", next to trading-bot. Needs scripts/install_vm.sh first
 # (it creates .venv). No API key, no orders: public market data only.
 #
