@@ -263,6 +263,7 @@ class Scanner:
         backoff = 5
         while not self.stop.is_set():
             ex = None
+            connected_at = time.time()
             try:
                 ex = await self._exchange()
                 self.last_data = time.time()
@@ -280,6 +281,11 @@ class Scanner:
             except SystemExit:
                 raise
             except Exception as e:
+                # A connection that worked for a while starts the backoff over:
+                # Binance drops long-lived streams now and then, and a backoff
+                # that only grows would leave the stream down minutes at a time
+                if time.time() - connected_at > 60:
+                    backoff = 5
                 log.warning("stream_error — reconnecting", extra={"error": str(e), "backoff_sec": backoff})
                 # Pending markouts span the gap: drop them rather than score stale prices
                 for qs in self.pending.values():
