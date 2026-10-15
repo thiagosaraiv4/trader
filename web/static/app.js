@@ -143,7 +143,7 @@ function initCharts() {
   });
 }
 
-let lastCandles = null;
+let lastCandles = null, priceFitted = false;
 
 function renderCandles(c) {
   lastCandles = c;
@@ -195,6 +195,9 @@ function renderCandles(c) {
   }
   markers.sort((a, b) => a.time - b.time);
   candleSeries.setMarkers(markers);
+  // First load: show every candle (few bars would leave the left side empty);
+  // later refreshes keep the user's zoom
+  if (!priceFitted) { priceChart.timeScale().fitContent(); priceFitted = true; }
   updateLegend(null);
 }
 
