@@ -287,15 +287,13 @@ class CcxtProvider:
         limit: int,
     ) -> pd.DataFrame:
         """Fetch OHLCV via ccxt (auto-selected exchange)."""
-        loop = asyncio.get_running_loop()
-        exchange = await loop.run_in_executor(None, lambda: self._ensure_exchange(symbol))
+        # to_thread (not run_in_executor) keeps the caller's context, so
+        # several bots in one process still log to their own files
+        exchange = await asyncio.to_thread(self._ensure_exchange, symbol)
 
         # ccxt returns list of [timestamp_ms, o, h, l, c, v]
         try:
-            raw = await loop.run_in_executor(
-                None,
-                lambda: exchange.fetch_ohlcv(symbol, timeframe, limit=limit),
-            )
+            raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
         except Exception as exc:
             # Reset cached exchange so fallback chain re-runs on next call
             self._log.warning(
@@ -325,14 +323,12 @@ class CcxtProvider:
         timeframe: str,
     ) -> BarData:
         """Fetch the latest (forming) bar."""
-        loop = asyncio.get_running_loop()
-        exchange = await loop.run_in_executor(None, lambda: self._ensure_exchange(symbol))
+        # to_thread (not run_in_executor) keeps the caller's context, so
+        # several bots in one process still log to their own files
+        exchange = await asyncio.to_thread(self._ensure_exchange, symbol)
 
         try:
-            raw = await loop.run_in_executor(
-                None,
-                lambda: exchange.fetch_ohlcv(symbol, timeframe, limit=2),
-            )
+            raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, limit=2)
         except Exception as exc:
             # Keep the same exchange: switching venues between polls would mix
             # another exchange's prices into indicators built from this one.
@@ -365,8 +361,7 @@ class CcxtProvider:
         """Close the ccxt exchange instance."""
         if self._exchange is not None:
             try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._exchange.close)
+                await asyncio.to_thread(self._exchange.close)
             except Exception:
                 pass
             self._exchange = None

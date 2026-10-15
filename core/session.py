@@ -44,6 +44,7 @@ def save_session(
     open_position: dict[str, Any] | None,
     trade_log: list[dict[str, Any]] | None = None,
     meta: dict[str, Any] | None = None,
+    path: Path | None = None,
 ) -> None:
     """
     Persist the current PaperTradingEngine state to disk.
@@ -53,7 +54,9 @@ def save_session(
         open_position: Serialized position dict, or None if flat.
         trade_log: List of serialized trade records.
         meta: Extra info about the run (e.g. strategy parameters).
+        path: session file of this bot (default: SESSION_PATH).
     """
+    path = path or SESSION_PATH
     payload = {
         "balance": balance,
         "open_position": open_position,
@@ -63,18 +66,18 @@ def save_session(
     try:
         # Atomic write: write to temp file, then rename.
         # Prevents corruption if process dies mid-write (Codespace shutdown).
-        tmp_path = SESSION_PATH.with_suffix(".tmp")
+        tmp_path = path.with_suffix(".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
             f.flush()
             os.fsync(f.fileno())
-        tmp_path.replace(SESSION_PATH)
-        _log.info("Session saved", extra={"path": str(SESSION_PATH)})
+        tmp_path.replace(path)
+        _log.info("Session saved", extra={"path": str(path)})
     except (OSError, TypeError) as e:
         _log.error(f"Failed to save session: {e}")
 
 
-def load_session(timeframe_seconds: int = 60) -> SessionState | None:
+def load_session(timeframe_seconds: int = 60, path: Path | None = None) -> SessionState | None:
     """
     Load a previously saved session from disk.
 
@@ -82,12 +85,13 @@ def load_session(timeframe_seconds: int = 60) -> SessionState | None:
         SessionState if file exists and is valid, None otherwise.
         Never raises — logs warning on any error.
     """
-    if not SESSION_PATH.exists():
+    path = path or SESSION_PATH
+    if not path.exists():
         _log.info("No session file found — starting fresh")
         return None
 
     try:
-        with open(SESSION_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         balance = float(data["balance"])
@@ -129,7 +133,7 @@ def load_session(timeframe_seconds: int = 60) -> SessionState | None:
         # Keep the unreadable file for inspection instead of letting the next
         # save overwrite it with a fresh session
         _log.error(f"Session file unreadable ({e!r}) — moved aside")
-        _move_aside(SESSION_PATH)
+        _move_aside(path)
         return None
 
 

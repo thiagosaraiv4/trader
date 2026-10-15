@@ -23,8 +23,13 @@ _log = get_logger(__name__, component="strategy_params")
 
 # A bot instance with its own folder (TRADER_DATA_DIR) may have its own
 # strategy.json; otherwise every coin trades the repository's strategy.json
-_OWN_PARAMS = DATA_DIR / "strategy.json"
-PARAMS_PATH = _OWN_PARAMS if DATA_DIR != ROOT and _OWN_PARAMS.exists() else ROOT / "strategy.json"
+def params_path_for(data_dir: Path) -> Path:
+    """strategy.json of a bot folder if it has one, else the repository's."""
+    own = data_dir / "strategy.json"
+    return own if data_dir != ROOT and own.exists() else ROOT / "strategy.json"
+
+
+PARAMS_PATH = params_path_for(DATA_DIR)
 
 
 STRATEGIES = ("ma_cross_v3", "trend_v4")

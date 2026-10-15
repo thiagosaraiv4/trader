@@ -207,11 +207,15 @@ A trend_v4 roda em outras moedas com os **mesmos parâmetros** do BTC (nada ajus
 cada uma num robô separado com sua própria conta de papel de US$ 10.000:
 
 ```bash
-bash scripts/install_coin.sh ETH SOL BNB        # serviços trading-bot-eth, -sol, -bnb
-tail -f logs/bot-eth.log                        # log de uma moeda
-sudo systemctl disable --now trading-bot-sol    # desligar uma moeda
+# Todas as moedas num processo só (serviço trading-bots; ~125 MB no total
+# em vez de ~100 MB por moeda). Rodar de novo com outra lista muda as moedas.
+bash scripts/install_bots.sh BTC ETH SOL BNB XLM TRX NEAR DOGE AVAX
+tail -f logs/bots.log                           # todas as moedas
+tail -f logs/bot-eth.log                        # uma moeda
 TRADER_SYMBOL=ETH/USDT TRADER_DATA_DIR=bots/eth .venv/bin/python run_comparison.py   # ao vivo × backtest
 ```
+
+(`scripts/install_coin.sh ETH` ainda cria um serviço separado por moeda, se preferir.)
 
 Cada moeda guarda `session.json`, `live_bars.csv` e `archive/` em `bots/<moeda>/` e usa o
 `strategy.json` da raiz (um `bots/<moeda>/strategy.json` dá parâmetros próprios a ela). O robô
@@ -225,6 +229,15 @@ Backtest de 6 anos (out/2020 → out/2026, candles 4h da Binance, taxas incluíd
 | ETH | 166 | +72,4% | 1,41 | 14,7% | 3 de 3 |
 | BNB | 165 | +88,1% | 1,41 | 22,6% | 3 de 3 |
 | SOL | 172 | +37,5% | 1,25 | 17,9% | 3 de 3 (o mais fraco) |
+
+Outras 16 moedas testadas do mesmo jeito (dez/2020 → out/2026): passaram, com lucro nos três
+blocos de 2 anos e fator de lucro ≥ 1,25, **XLM** (1,73), **TRX** (1,52), **NEAR** (1,48),
+**DOGE** (1,41) e **AVAX** (1,26). ETC, ADA, XRP e DOT perderam num dos blocos; BCH, FIL, AAVE,
+LTC, LINK, UNI e ATOM ficaram fracas ou negativas. Escolher as melhores de 16 tem sorte embutida:
+espere delas, ao vivo, algo mais perto da média (fator ~1,25).
+
+Candles menores dão mais trades e perdem: no mesmo teste, 1h ficou perto do zero com quedas de
+36–72%, e 15 min perdeu ~98% em todas as moedas (taxas e falsos rompimentos).
 
 As moedas sobem e caem juntas: os robôs tendem a comprar na mesma alta e perder na mesma
 queda. Somadas numa conta só, seriam ~4 × 2% de risco ao mesmo tempo — para dinheiro real,

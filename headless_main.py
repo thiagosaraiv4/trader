@@ -15,16 +15,27 @@ Architecture:
 
 Signal handlers (SIGINT / SIGTERM) save session before exit.
 Periodic session save every 300s via asyncio.create_task.
+
+One coin per process (default; TRADER_SYMBOL / TRADER_DATA_DIR pick it):
+    python headless_main.py
+Several coins in ONE process (saves ~100 MB per coin on a 1 GB VM):
+    python headless_main.py --coins BTC,ETH,SOL
+Each coin still has its own paper account, folder (BTC: repository root,
+others: bots/<coin>/), lock and log file (logs/bot.log, logs/bot-<coin>.log);
+logs/bots.log (the service's output) has every coin's lines.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,13 +45,13 @@ import pandas as pd
 
 from core.algo_trading import AlgoEngine
 from core.strategy_factory import build_indicator_engine, create_strategy
-from core.bar_log import BAR_LOG_PATH, append_bars, bars_from_dataframe, new_run_id
+from core.bar_log import append_bars, bars_from_dataframe, new_run_id
 from core.config import AppConfig
 from core.paper_trading import OrderRequest, PaperTradingCore, PositionSnapshot, TradeResult
-from core.paths import DATA_DIR
-from core.session import SESSION_PATH, load_session, save_session
-from core.strategy_params import InvalidParams, StrategyParams, load_params
-from core.types import BarData, FeedConfig, FeedStateChange, ProviderID, Timeframe
+from core.paths import DATA_DIR, ROOT
+from core.session import load_session, save_session
+from core.strategy_params import InvalidParams, StrategyParams, load_params, params_path_for
+from core.types import BarData, FeedConfig, FeedStateChange, ProviderID, Symbol, Timeframe
 from data.feed import DataFeedManager
 from utils.logger import JsonLineFormatter
 
@@ -82,9 +93,14 @@ class HeadlessTradingBot:
         6. Graceful shutdown on SIGINT / SIGTERM
     """
 
-    def __init__(self, cfg: AppConfig, params: StrategyParams | None = None) -> None:
+    def __init__(self, cfg: AppConfig, params: StrategyParams | None = None,
+                 data_dir: Path | None = None) -> None:
+        # This bot's folder: session.json, live_bars.csv, archive/
+        self._data_dir: Path = data_dir or DATA_DIR
+        self._session_path: Path = self._data_dir / "session.json"
+        self._bars_path: Path = self._data_dir / "live_bars.csv"
         # Strategy parameters (strategy.json) also choose the timeframe
-        self._params: StrategyParams = params or load_params()
+        self._params: StrategyParams = params or load_params(params_path_for(self._data_dir))
         cfg = replace(cfg, default_timeframe=Timeframe(self._params.timeframe))
         self._cfg = cfg
         self._running: bool = False
@@ -100,14 +116,15 @@ class HeadlessTradingBot:
         self._seg: str = ""
 
         # -- Restore session -----------------------------------------------
-        session_existed = SESSION_PATH.exists()
+        session_existed = self._session_path.exists()
         session = load_session(
-            timeframe_seconds=cfg.default_timeframe.to_seconds()
+            timeframe_seconds=cfg.default_timeframe.to_seconds(),
+            path=self._session_path,
         )
         if session is None and session_existed:
             # Unreadable session.json (moved aside by load_session): don't
             # mix the old live_bars.csv into the fresh session
-            archive = _archive_run()
+            archive = _archive_run(self._data_dir)
             log.error(
                 "session_unreadable — starting fresh",
                 extra={"component": "headless", "reason": str(archive)},
@@ -117,12 +134,12 @@ class HeadlessTradingBot:
             if other and other != str(cfg.default_symbol):
                 # Never trade one coin's position or results as another's
                 raise WrongSymbol(
-                    f"{SESSION_PATH} belongs to {other}, this bot trades {cfg.default_symbol} "
+                    f"{self._session_path} belongs to {other}, this bot trades {cfg.default_symbol} "
                     "(check TRADER_SYMBOL / TRADER_DATA_DIR of the service)")
         if session is not None and self._params_changed(session.meta):
             # Different parameters = a different experiment: start a clean
             # session so live results and run_comparison.py stay meaningful.
-            archive = _archive_run()
+            archive = _archive_run(self._data_dir)
             log.warning(
                 "strategy_params_changed — previous session archived, starting fresh",
                 extra={"component": "headless", "reason": str(archive)},
@@ -342,7 +359,7 @@ class HeadlessTradingBot:
         # Warm-up bars too, so run_comparison.py can replay from the same state
         self._snapshot_no += 1
         self._seg = f"{self._run_id}:{self._snapshot_no}"
-        append_bars(bars_from_dataframe(closed_df), kind="warmup", seg=self._seg)
+        append_bars(bars_from_dataframe(closed_df), kind="warmup", seg=self._seg, path=self._bars_path)
         log.info(
             "snapshot_loaded",
             extra={
@@ -402,7 +419,7 @@ class HeadlessTradingBot:
             3. PaperTradingCore.execute_order(order) — fills at the live price
         """
         self._bar_count += 1
-        append_bars([bar], kind="live", seg=self._seg)
+        append_bars([bar], kind="live", seg=self._seg, path=self._bars_path)
 
         # Step 1: Update indicators — O(1) per indicator
         indicators = self._indicator_engine.update(bar)
@@ -448,6 +465,7 @@ class HeadlessTradingBot:
                     "halted": self._algo_engine.halted,
                 },
             },
+            path=self._session_path,
         )
         log.info(
             "session_saved",
@@ -582,17 +600,17 @@ def _session_symbol(session: Any) -> str | None:
     return str(sym) if sym else None
 
 
-def _archive_run() -> Path:
+def _archive_run(data_dir: Path = DATA_DIR) -> Path:
     """Move session.json and live_bars.csv to archive/<UTC time>/."""
-    dest = DATA_DIR / "archive" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest = data_dir / "archive" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dest.mkdir(parents=True, exist_ok=True)
-    for path in (SESSION_PATH, BAR_LOG_PATH):
+    for path in (data_dir / "session.json", data_dir / "live_bars.csv"):
         if path.exists():
             path.replace(dest / path.name)
     return dest
 
 
-def _acquire_instance_lock() -> TextIO | None:
+def _acquire_instance_lock(data_dir: Path = DATA_DIR) -> TextIO | None:
     """
     Hold an exclusive lock for the whole process lifetime so two bots never
     write the same session.json (e.g. watchdog + a manual `python headless_main.py`).
@@ -605,8 +623,8 @@ def _acquire_instance_lock() -> TextIO | None:
     except ImportError:
         return open(os.devnull, "w")
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    lock_file = open(DATA_DIR / "session.lock", "w")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = open(data_dir / "session.lock", "w")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -615,8 +633,188 @@ def _acquire_instance_lock() -> TextIO | None:
     return lock_file
 
 
+# ---------------------------------------------------------------------------
+# Several coins in one process (--coins)
+# ---------------------------------------------------------------------------
+
+BOTS_DIR = ROOT / "bots"
+LOG_DIR = ROOT / "logs"
+RUNNER_INFO = BOTS_DIR / "runner.json"
+# Seconds between coin starts: spreads the first downloads over time
+_START_STAGGER_SEC = 3.0
+
+# Coin of the code running now. asyncio tasks (and asyncio.to_thread) copy
+# it, so every log line knows which bot wrote it.
+_current_bot: contextvars.ContextVar[str | None] = contextvars.ContextVar("bot", default=None)
+
+
+def _coin_dir(bot_id: str) -> Path:
+    """BTC keeps its files at the repository root (as the original bot)."""
+    return ROOT if bot_id == "btc" else BOTS_DIR / bot_id
+
+
+def _coin_log(bot_id: str) -> Path:
+    return LOG_DIR / ("bot.log" if bot_id == "btc" else f"bot-{bot_id}.log")
+
+
+def _parse_coins(raw: str) -> list[str]:
+    coins: list[str] = []
+    for part in raw.split(","):
+        coin = part.strip().upper()
+        if not coin:
+            continue
+        if not coin.isalnum() or not 2 <= len(coin) <= 10:
+            raise ValueError(f"invalid coin {part!r} (use symbols like BTC,ETH)")
+        if coin not in coins:
+            coins.append(coin)
+    if not coins:
+        raise ValueError("no coins given")
+    return coins
+
+
+def _route_logs_per_coin(bot_ids: list[str]) -> None:
+    """Tag every log record with its bot and copy each bot's lines to its
+    own file, the same file it had as a separate service."""
+    base_factory = logging.getLogRecordFactory()
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = base_factory(*args, **kwargs)
+        bot_id = _current_bot.get()
+        if bot_id is not None and not hasattr(record, "bot"):
+            record.bot = bot_id
+        return record
+
+    logging.setLogRecordFactory(factory)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    for bot_id in bot_ids:
+        handler = logging.FileHandler(_coin_log(bot_id), encoding="utf-8")
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(JsonLineFormatter())
+        handler.addFilter(lambda rec, b=bot_id: getattr(rec, "bot", None) == b)
+        root.addHandler(handler)
+
+
+def _write_runner_info(bot_ids: list[str]) -> None:
+    """Tell the web panel these coins run in one service (trading-bots)."""
+    try:
+        BOTS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = RUNNER_INFO.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"service": "trading-bots", "coins": bot_ids,
+                                   "pid": os.getpid(), "started": time.time()}), encoding="utf-8")
+        tmp.replace(RUNNER_INFO)
+    except OSError as e:
+        log.warning("runner_info_not_written", extra={"component": "headless", "error": str(e)})
+
+
+async def run_many(coins: list[str]) -> int:
+    """
+    One HeadlessTradingBot per coin, all in this process. A coin whose
+    folder is locked by another process, or whose session is another
+    coin's, is skipped; the others still run. If a coin's task fails, every
+    coin saves and the process exits 1 so systemd restarts all of them.
+    Returns the exit code.
+    """
+    ids = [c.lower() for c in coins]
+    _route_logs_per_coin(ids)
+    loop = asyncio.get_running_loop()
+    # Each coin polls the exchange from a thread: room for all of them
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=max(8, 2 * len(ids))))
+
+    bots: list[tuple[str, HeadlessTradingBot]] = []
+    locks: list[TextIO] = []
+    for coin, bot_id in zip(coins, ids):
+        token = _current_bot.set(bot_id)
+        try:
+            data_dir = _coin_dir(bot_id)
+            lock = _acquire_instance_lock(data_dir)
+            if lock is None:
+                log.error("another_instance_running — coin skipped",
+                          extra={"component": "headless", "reason": f"{data_dir / 'session.lock'} is held"})
+                continue
+            try:
+                cfg = AppConfig(default_symbol=Symbol(coin, "USDT"))
+                bot = HeadlessTradingBot(cfg, data_dir=data_dir)
+            except WrongSymbol as e:
+                log.error("wrong_symbol — coin NOT started", extra={"component": "headless", "error": str(e)})
+                lock.close()
+                continue
+            bots.append((bot_id, bot))
+            locks.append(lock)
+        finally:
+            _current_bot.reset(token)
+    if not bots:
+        log.error("no_coin_started — exiting", extra={"component": "headless"})
+        return 2
+
+    running = [b for b, _ in bots]
+    _write_runner_info(running)
+    log.info("bots_started", extra={"component": "headless", "coins": running})
+
+    def shutdown_all() -> None:
+        for _, bot in bots:
+            bot.request_shutdown()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, shutdown_all)
+        except NotImplementedError:
+            signal.signal(sig, lambda s, f: shutdown_all())
+
+    tasks: dict[asyncio.Task, str] = {}
+    for i, (bot_id, bot) in enumerate(bots):
+        if i:
+            await asyncio.sleep(_START_STAGGER_SEC)
+        token = _current_bot.set(bot_id)
+        try:
+            tasks[asyncio.create_task(bot.run(), name=f"bot-{bot_id}")] = bot_id
+        finally:
+            _current_bot.reset(token)
+
+    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    failed = [t for t in done if not t.cancelled() and t.exception() is not None]
+    if failed:
+        for t in failed:
+            log.error("bot_crashed — stopping every coin to restart cleanly",
+                      extra={"component": "headless", "coin": tasks[t], "error": repr(t.exception())})
+        shutdown_all()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for bot_id, bot in bots:          # crashed coins never reached their final save
+            token = _current_bot.set(bot_id)
+            try:
+                bot.save()
+            except Exception as e:  # noqa: BLE001 — saving the others matters more
+                log.error("final_save_failed", extra={"component": "headless", "error": repr(e)})
+            finally:
+                _current_bot.reset(token)
+        return 1
+    log.info("bots_stopped", extra={"component": "headless", "coins": running})
+    return 0
+
+
 def main() -> None:
     """Synchronous entry point."""
+    parser = argparse.ArgumentParser(description="Paper trading bot (headless).")
+    parser.add_argument("--coins", help="several coins in one process, e.g. BTC,ETH,SOL "
+                                        "(quoted in USDT; BTC uses the repository root)")
+    args = parser.parse_args()
+    if args.coins:
+        try:
+            coins = _parse_coins(args.coins)
+        except ValueError as e:
+            parser.error(str(e))
+        try:
+            code = asyncio.run(run_many(coins))
+        except InvalidParams as e:
+            log.error(
+                "invalid_strategy_json — bots NOT started; fix strategy.json and restart",
+                extra={"component": "headless", "error": str(e)},
+            )
+            sys.exit(2)
+        except KeyboardInterrupt:
+            code = 0
+        sys.exit(code)
+
     lock = _acquire_instance_lock()
     if lock is None:
         log.error(

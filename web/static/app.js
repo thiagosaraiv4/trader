@@ -265,15 +265,18 @@ function renderEquity(curve) {
 // ---------------------------------------------------------------- panels
 const TOOLS = { "pair-scanner": { name: "Scanner", log: "scanner" }, "maker-bot": { name: "Maker", log: "maker" } };
 
-// "trading-bot" → BTC, "trading-bot-eth" → ETH, research tools by name
+// "trading-bots" → every coin in one process; "trading-bot" → BTC,
+// "trading-bot-eth" → ETH; research tools by name
 function serviceName(svc) {
   if (TOOLS[svc]) return TOOLS[svc].name;
+  if (svc === "trading-bots") return "Robôs";
   if (svc === "trading-bot") return "BTC";
   return svc.replace(/^trading-bot-/, "").toUpperCase();
 }
 
 function serviceLog(s, svc) {
   if (TOOLS[svc]) return TOOLS[svc].log;
+  if (svc === "trading-bots") return "bots";
   const b = (s.bots || []).find((x) => x.service === svc);
   return b ? b.log : null;
 }
@@ -354,7 +357,8 @@ function renderBots(d) {
 let logButtonsKey = "";
 
 function renderLogButtons(s) {
-  const names = (s.bots || []).map((b) => [b.log, serviceName(b.service)])
+  const names = (s.bots || []).map((b) => [b.log, b.id.toUpperCase()])
+    .concat(s.heartbeats && "bots" in s.heartbeats ? [["bots", "Todos"]] : [])
     .concat([["scanner", "Scanner"], ["maker", "Maker"]]);
   const key = names.map((n) => n[0]).join(",");
   if (key !== logButtonsKey) {

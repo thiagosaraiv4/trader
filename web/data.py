@@ -180,9 +180,25 @@ def _last_event(path: Path, event: str) -> dict | None:
 # bot instances
 # ---------------------------------------------------------------------------
 
+def _runner() -> dict:
+    """Coins running together in the trading-bots service (headless_main
+    --coins writes bots/runner.json when it starts), if any."""
+    info = _read_json(BOTS_DIR / "runner.json") or {}
+    coins = info.get("coins")
+    return {"service": str(info.get("service") or "trading-bots"),
+            "coins": {str(c) for c in coins} if isinstance(coins, list) else set()}
+
+
 def bots() -> list[dict]:
-    """Every trading bot: BTC at the root, then bots/<id>/ in name order."""
-    out = [{"id": "btc", "dir": ROOT, "log": "bot", "service": "trading-bot"}]
+    """Every trading bot: BTC at the root, then bots/<id>/ in name order.
+    service = the systemd unit running it: trading-bots for the coins of the
+    shared process, else its own unit (trading-bot, trading-bot-<id>)."""
+    runner = _runner()
+
+    def service(bot_id: str, own: str) -> str:
+        return runner["service"] if bot_id in runner["coins"] else own
+
+    out = [{"id": "btc", "dir": ROOT, "log": "bot", "service": service("btc", "trading-bot")}]
     try:
         dirs = sorted(d for d in BOTS_DIR.iterdir()
                       if d.is_dir() and _BOT_ID.match(d.name) and d.name != "btc")
@@ -190,7 +206,7 @@ def bots() -> list[dict]:
         dirs = []
     for d in dirs:
         out.append({"id": d.name, "dir": d, "log": f"bot-{d.name}",
-                    "service": f"trading-bot-{d.name}"})
+                    "service": service(d.name, f"trading-bot-{d.name}")})
     return out
 
 
@@ -203,12 +219,15 @@ def get_bot(bot_id: str | None = None) -> dict:
 
 
 def log_files() -> dict[str, str]:
-    """Readable logs: one per bot (bot, bot-eth, ...) plus the tools'."""
-    return {b["log"]: b["log"] + ".log" for b in bots()} | TOOL_LOGS
+    """Readable logs: one per bot (bot, bot-eth, ...), the shared process's
+    (bots: every coin's lines) and the tools'."""
+    shared = {"bots": "bots.log"} if _runner()["coins"] else {}
+    return {b["log"]: b["log"] + ".log" for b in bots()} | shared | TOOL_LOGS
 
 
 def services() -> tuple[str, ...]:
-    return tuple(b["service"] for b in bots()) + TOOL_SERVICES
+    """Each systemd unit once, bots first."""
+    return tuple(dict.fromkeys(b["service"] for b in bots())) + TOOL_SERVICES
 
 
 def _session(b: dict) -> dict | None:
