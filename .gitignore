@@ -45,3 +45,6 @@ research_notes/
 # Pair scanner (pair_scanner.py)
 scanner_stats.json
 scanner_stats.tmp
+
+# Web panel password (dashboard.py)
+.panel_password

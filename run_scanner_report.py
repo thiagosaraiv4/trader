@@ -51,6 +51,36 @@ def _median_ticks(st: PairStats) -> float:
     return math.nan
 
 
+def scanner_rows(data: dict, overrides: dict[str, float] | None = None) -> list[dict]:
+    """One dict per pair from scanner_stats.json data (also used by the web panel)."""
+    overrides = overrides or {}
+    rows = []
+    for sym, d in sorted(data.get("pairs", {}).items()):
+        st = PairStats.from_dict(d)
+        hours = st.seconds / 3600
+        t = {h: _mean_se(st.marks["touch"][h])[0] for h in HORIZONS}
+        thr, thr_se = _mean_se(st.marks["through"][5])
+        fee = _maker_fee_bps(sym, overrides)
+        net = thr - fee
+        n_thr = st.marks["through"][5][0]
+        if hours < _MIN_HOURS or n_thr < _MIN_EVENTS:
+            verdict = f"pouco dado (<{_MIN_HOURS}h ou <{_MIN_EVENTS} exec.)"
+        elif net > 3 * thr_se and net > 0:
+            verdict = "CANDIDATO: testar no maker"
+        elif t[5] - fee > 0:
+            verdict = "só ganha na frente da fila (inviável a 260 ms)"
+        else:
+            verdict = "sem vantagem"
+        rows.append({
+            "symbol": sym, "hours": hours, "spread_ticks": _median_ticks(st),
+            "spread_bp": st.spread_bps_sum / st.seconds if st.seconds else math.nan,
+            "exec_per_hour": st.events.get("touch", 0) / hours if hours else 0.0,
+            "touch": t, "through5": thr, "n": n_thr, "fee_bp": fee, "net_bp": net,
+            "verdict": verdict,
+        })
+    return rows
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Relatório do scanner de pares.")
     p.add_argument("--fee", action="append", default=[], metavar="PAR=PCT",
@@ -78,30 +108,13 @@ def main() -> None:
     print(hdr)
     print(f"  {'':<11} {'':>5} {'ticks':>6} {'bp':>7} {'':>7} | {'(otimista)':>22} | {'(pessimista)':>10} "
           f"{'':>5} {'maker':>5} {'':>8} |")
-    rows = []
-    for sym, d in sorted(data.get("pairs", {}).items()):
-        st = PairStats.from_dict(d)
-        hours = st.seconds / 3600
-        spread_bp = st.spread_bps_sum / st.seconds if st.seconds else math.nan
-        ev_h = st.events.get("touch", 0) / hours if hours else 0.0
-        t = {h: _mean_se(st.marks["touch"][h])[0] for h in HORIZONS}
-        thr, thr_se = _mean_se(st.marks["through"][5])
-        fee = _maker_fee_bps(sym, overrides)
-        net = thr - fee
-        n_thr = st.marks["through"][5][0]
-        if hours < _MIN_HOURS or n_thr < _MIN_EVENTS:
-            verdict = f"pouco dado (<{_MIN_HOURS}h ou <{_MIN_EVENTS} exec.)"
-        elif net > 3 * thr_se and net > 0:
-            verdict = "CANDIDATO: testar no maker"
-        elif t[5] - fee > 0:
-            verdict = "só ganha na frente da fila (inviável a 260 ms)"
-        else:
-            verdict = "sem vantagem"
-        rows.append((net if not math.isnan(net) else -1e9, sym))
-        fmt = lambda v, w: f"{'—':>{w}}" if math.isnan(v) else f"{v:>+{w}.2f}"
-        print(f"  {sym:<11} {hours:>5.1f} {_median_ticks(st):>6.0f} {spread_bp:>7.2f} {ev_h:>7.0f} | "
-              f"{fmt(t[1], 8)} {fmt(t[5], 6)} {fmt(t[30], 6)} | {fmt(thr, 10)} {n_thr:>5} {fee:>5.1f} "
-              f"{fmt(net, 8)} | {verdict}")
+    rows = scanner_rows(data, overrides)
+    fmt = lambda v, w: f"{'—':>{w}}" if math.isnan(v) else f"{v:>+{w}.2f}"
+    for r in rows:
+        t = r["touch"]
+        print(f"  {r['symbol']:<11} {r['hours']:>5.1f} {r['spread_ticks']:>6.0f} {r['spread_bp']:>7.2f} "
+              f"{r['exec_per_hour']:>7.0f} | {fmt(t[1], 8)} {fmt(t[5], 6)} {fmt(t[30], 6)} | "
+              f"{fmt(r['through5'], 10)} {r['n']:>5} {r['fee_bp']:>5.1f} {fmt(r['net_bp'], 8)} | {r['verdict']}")
     print()
     print("  spread: mediano em ticks e médio em bp (ponderados pelo tempo). exec/h: negócios por hora no")
     print("  preço do topo. n: execuções pessimistas medidas (o veredito exige 100).")
@@ -110,8 +123,9 @@ def main() -> None:
     print("  fila consegue a ~260 ms. 'líquido' = pessimista +5 s menos a taxa maker. Só vale testar um")
     print("  par com líquido positivo acima do ruído (3 erros-padrão) depois de pelo menos 1 dia.")
     print("=" * 112)
-    best = max(rows) if rows else None
-    if best and best[0] > -1e9:
+    ranked = [(r["net_bp"], r["symbol"]) for r in rows if not math.isnan(r["net_bp"])]
+    if ranked:
+        best = max(ranked)
         print(f"  Melhor líquido pessimista até agora: {best[1]} ({best[0]:+.2f} bp por execução).")
         print("=" * 112)
 

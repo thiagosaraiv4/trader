@@ -201,6 +201,28 @@ Os trades ficam em `maker_trades.csv` (coluna `variant`); um arquivo da versão 
 essa coluna, é movido para `maker_trades_v1.csv`. Deixe rodar 1–2 semanas antes de concluir. A taxa maker
 zero do BTC/FDUSD é promocional ("até segunda ordem"); confira antes de qualquer teste real.
 
+### Painel web (estilo plataforma de trading)
+
+`dashboard.py` abre um painel no navegador com gráfico de candles do robô (canal de Donchian,
+média, marcações de compra/venda, linhas de entrada e stop), patrimônio, desempenho, posição,
+parâmetros, trades, relatórios do scanner e do maker, logs e status dos serviços. Atualiza a cada
+30 s. **Só leitura**: não envia ordens nem altera os robôs. Usa só o que já está instalado
+(aiohttp vem com o ccxt) e ~50 MB de RAM.
+
+```bash
+bash scripts/install_dashboard.sh                         # serviço trader-panel (127.0.0.1:8080)
+# no SEU computador (PowerShell ou terminal), deixe aberto:
+ssh -i CHAVE.key -L 8080:127.0.0.1:8080 ubuntu@IP_DA_VM
+# e abra http://localhost:8080
+```
+
+Por padrão o painel só escuta na própria VM e o acesso é pelo túnel SSH (criptografado, sem abrir
+portas). Para escutar na rede (`--host 0.0.0.0`) é obrigatório ter senha (`TRADER_PANEL_PASSWORD`
+ou arquivo `.panel_password`, mínimo 10 caracteres) — sem HTTPS, prefira o túnel.
+
+A API JSON (`/api/v1/status`, `/bot`, `/candles`, `/scanner`, `/maker`, `/logs/{bot,scanner,maker}`)
+é a mesma que um app ou uma versão multiusuário usaria no futuro.
+
 ### Scanner de pares (onde um maker lento teria chance?)
 
 No BTC/FDUSD o spread é de 1 tick e a seleção adversa é ~1000× maior (ver

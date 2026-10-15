@@ -1,0 +1,180 @@
+/* Trader panel — dark first (trading platform), light when the OS asks.
+   Colors are role tokens; values from the validated dataviz palette. */
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --series-1: #3987e5;   /* blue */
+  --series-2: #d95926;   /* orange */
+  --series-3: #199e70;   /* aqua */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --good-text: #0ca30c;
+  --radius: 10px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --surface-2: #f0efec;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.10);
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --good-text: #006300;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.4 var(--font); }
+a { color: var(--series-1); }
+button { font: inherit; }
+
+/* ---- top bar --------------------------------------------------------- */
+.topbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+  padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10;
+}
+.brand { font-weight: 700; letter-spacing: 0.02em; }
+.brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+.ticker { display: flex; align-items: baseline; gap: 8px; }
+.ticker .sym { color: var(--ink-2); }
+.ticker .px { font-size: 20px; font-weight: 600; }
+.pills { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+  border: 1px solid var(--border); border-radius: 999px; color: var(--ink-2); font-size: 12px;
+  background: var(--surface-2);
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill.ok .dot { background: var(--good); }
+.pill.warn .dot { background: var(--warning); }
+.pill.bad .dot { background: var(--critical); }
+.updated { color: var(--muted); font-size: 12px; }
+.logout { color: var(--muted); font-size: 12px; text-decoration: none; }
+
+/* ---- layout ------------------------------------------------------------ */
+.layout {
+  display: grid; gap: 12px; padding: 12px 16px 24px;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-areas: "chart side" "equity side" "tabs tabs";
+}
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.card > header {
+  display: flex; align-items: baseline; gap: 10px; padding: 10px 14px 0;
+  font-weight: 600;
+}
+.card > header .sub { color: var(--muted); font-weight: 400; font-size: 12px; }
+.chart-card { grid-area: chart; }
+.equity-card { grid-area: equity; }
+.side { grid-area: side; display: flex; flex-direction: column; gap: 12px; }
+.tabs-card { grid-area: tabs; }
+.loading { opacity: 0.6; transition: opacity 0.2s; }
+
+/* charts: container includes the time axis, no nested scroll */
+.chart-wrap { position: relative; padding: 6px 4px 4px; }
+#price-chart { height: 460px; }
+#equity-chart { height: 220px; }
+.legend {
+  position: absolute; top: 10px; left: 14px; z-index: 2; pointer-events: none;
+  display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.legend .key { display: inline-flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 14px; height: 2px; border-radius: 1px; background: var(--muted); }
+.legend .swatch.s1 { background: var(--series-1); }
+.legend .swatch.s2 { background: var(--series-2); }
+.legend .swatch.s3 { background: var(--series-3); }
+.legend b { color: var(--ink); font-weight: 600; }
+.empty { padding: 40px 14px; color: var(--muted); text-align: center; }
+
+/* ---- stat tiles ------------------------------------------------------- */
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px; }
+.tile { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
+.tile .label { color: var(--muted); font-size: 12px; }
+.tile .value { font-size: 20px; font-weight: 600; margin-top: 2px; white-space: nowrap; }
+.tile .hint { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.pos { color: var(--good-text); }
+.neg { color: var(--critical); }
+
+/* key/value lists */
+.kv { margin: 0; padding: 8px 14px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.badge {
+  display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+
+/* ---- tabs & tables ---------------------------------------------------- */
+.tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tabs button {
+  background: none; border: 0; color: var(--ink-2); padding: 8px 12px; cursor: pointer;
+  border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--series-1); }
+.tabs button:focus-visible { outline: 2px solid var(--series-1); outline-offset: -2px; }
+.tab-panel { padding: 10px 14px 14px; overflow-x: auto; }
+.tab-panel[hidden] { display: none; }
+.note { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--grid); text-align: right; white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+th:first-child, td:first-child, th.text { text-align: left; }
+td.text { text-align: left; white-space: normal; }
+tbody tr:hover { background: var(--surface-2); }
+
+/* logs */
+.log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0; }
+.log .line { display: grid; grid-template-columns: 150px 70px 1fr; gap: 8px; padding: 1px 0; border-bottom: 1px solid var(--grid); }
+.log .time { color: var(--muted); }
+.log .lvl-WARNING { color: var(--warning); }
+.log .lvl-ERROR, .log .lvl-CRITICAL { color: var(--critical); }
+.log .msg { word-break: break-word; color: var(--ink-2); }
+.log-select { display: flex; gap: 8px; margin-bottom: 8px; }
+.log-select button {
+  background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer;
+}
+.log-select button[aria-pressed="true"] { color: var(--ink); border-color: var(--series-1); }
+
+/* ---- login -------------------------------------------------------------- */
+.login-page { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.login-card { width: 100%; max-width: 340px; padding: 24px; }
+.login-card h1 { font-size: 18px; margin: 0 0 16px; }
+.login-card label { display: block; color: var(--ink-2); margin-bottom: 6px; }
+.login-card input {
+  width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--ink); font: inherit;
+}
+.login-card button {
+  margin-top: 14px; width: 100%; padding: 10px; border: 0; border-radius: 8px;
+  background: var(--series-1); color: #fff; font-weight: 600; cursor: pointer;
+}
+.login-card .error { color: var(--critical); margin: 10px 0 0; min-height: 1.4em; }
+
+footer.foot { color: var(--muted); font-size: 12px; padding: 0 16px 20px; }
+
+/* ---- small screens ------------------------------------------------------ */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "chart" "side" "equity" "tabs"; }
+  #price-chart { height: 360px; }
+  .legend { position: static; padding: 0 10px 6px; }
+  .pills { margin-left: 0; }
+}

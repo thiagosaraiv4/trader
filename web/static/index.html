@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trader · Painel</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/vendor/lightweight-charts-4.2.0.standalone.production.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Trader <small>paper trading</small></div>
+    <div class="ticker"><span class="sym" id="sym">—</span><span class="px" id="px">—</span></div>
+    <div class="pills" id="pills" aria-label="Status dos robôs"></div>
+    <span class="updated" id="updated" aria-live="polite"></span>
+    <a class="logout" id="logout" href="/logout" hidden>Sair</a>
+  </header>
+
+  <main class="layout">
+    <section class="card chart-card" aria-labelledby="chart-title">
+      <header><span id="chart-title">Gráfico</span><span class="sub" id="chart-sub"></span></header>
+      <div class="chart-wrap">
+        <div class="legend" id="legend"></div>
+        <div id="price-chart"></div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <section class="card" aria-labelledby="perf-title">
+        <header><span id="perf-title">Desempenho</span><span class="sub">desde o início da sessão</span></header>
+        <div class="tiles" id="tiles"></div>
+      </section>
+      <section class="card" aria-labelledby="pos-title">
+        <header><span id="pos-title">Posição</span></header>
+        <dl class="kv" id="position"></dl>
+      </section>
+      <section class="card" aria-labelledby="params-title">
+        <header><span id="params-title">Estratégia</span><span class="sub" id="strategy-name"></span></header>
+        <dl class="kv" id="params"></dl>
+      </section>
+    </aside>
+
+    <section class="card equity-card" aria-labelledby="equity-title">
+      <header><span id="equity-title">Patrimônio</span><span class="sub">US$, após taxas · linha fina = capital inicial</span></header>
+      <div class="chart-wrap"><div id="equity-chart"></div></div>
+    </section>
+
+    <section class="card tabs-card">
+      <div class="tabs" role="tablist" aria-label="Detalhes">
+        <button role="tab" aria-selected="true" aria-controls="tab-trades" id="t-trades">Trades</button>
+        <button role="tab" aria-selected="false" aria-controls="tab-scanner" id="t-scanner">Scanner de pares</button>
+        <button role="tab" aria-selected="false" aria-controls="tab-maker" id="t-maker">Maker</button>
+        <button role="tab" aria-selected="false" aria-controls="tab-logs" id="t-logs">Logs</button>
+        <button role="tab" aria-selected="false" aria-controls="tab-system" id="t-system">Sistema</button>
+      </div>
+      <div class="tab-panel" role="tabpanel" id="tab-trades" aria-labelledby="t-trades"></div>
+      <div class="tab-panel" role="tabpanel" id="tab-scanner" aria-labelledby="t-scanner" hidden></div>
+      <div class="tab-panel" role="tabpanel" id="tab-maker" aria-labelledby="t-maker" hidden></div>
+      <div class="tab-panel" role="tabpanel" id="tab-logs" aria-labelledby="t-logs" hidden>
+        <div class="log-select" id="log-select">
+          <button data-log="bot" aria-pressed="true">Robô principal</button>
+          <button data-log="scanner" aria-pressed="false">Scanner</button>
+          <button data-log="maker" aria-pressed="false">Maker</button>
+        </div>
+        <div class="log" id="log"></div>
+      </div>
+      <div class="tab-panel" role="tabpanel" id="tab-system" aria-labelledby="t-system" hidden></div>
+    </section>
+  </main>
+  <footer class="foot">Somente leitura — o painel não envia ordens nem altera os robôs. Horários no fuso deste navegador.
+    Gráficos: <a href="https://www.tradingview.com/" rel="noopener noreferrer" target="_blank">TradingView Lightweight Charts™</a>.</footer>
+</body>
+</html>
