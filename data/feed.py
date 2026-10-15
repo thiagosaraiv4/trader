@@ -211,7 +211,25 @@ class CcxtProvider:
         """Exchange currently serving prices ("" before the first snapshot)."""
         return self._exchange_id
 
-    def _ensure_exchange(self) -> Any:
+    def _load_markets(self, exchange: Any, exchange_id: str, symbol: str) -> None:
+        """
+        Binance: load only this bot's market. The full list of thousands of
+        markets costs ~100 MB per bot process, and the VM runs one bot per
+        coin. Anything unexpected falls back to loading every market.
+        """
+        if exchange_id == "binance" and symbol:
+            try:
+                exchange.load_markets(False, {"symbol": symbol.replace("/", "")})
+                if symbol in (exchange.markets or {}):
+                    return
+            except Exception as exc:
+                self._log.warning(
+                    "single-market load failed — loading all markets",
+                    extra={"error": str(exc)[:120]},
+                )
+        exchange.load_markets(True)
+
+    def _ensure_exchange(self, symbol: str = "") -> Any:
         """Lazy-init the ccxt exchange instance with fallback chain."""
         if self._exchange is not None:
             return self._exchange
@@ -237,7 +255,7 @@ class CcxtProvider:
                 })
 
                 # Probe connectivity by loading markets
-                exchange.load_markets()
+                self._load_markets(exchange, exchange_id, symbol)
 
                 self._exchange = exchange
                 self._exchange_id = exchange_id
@@ -270,7 +288,7 @@ class CcxtProvider:
     ) -> pd.DataFrame:
         """Fetch OHLCV via ccxt (auto-selected exchange)."""
         loop = asyncio.get_running_loop()
-        exchange = await loop.run_in_executor(None, self._ensure_exchange)
+        exchange = await loop.run_in_executor(None, lambda: self._ensure_exchange(symbol))
 
         # ccxt returns list of [timestamp_ms, o, h, l, c, v]
         try:
@@ -308,7 +326,7 @@ class CcxtProvider:
     ) -> BarData:
         """Fetch the latest (forming) bar."""
         loop = asyncio.get_running_loop()
-        exchange = await loop.run_in_executor(None, self._ensure_exchange)
+        exchange = await loop.run_in_executor(None, lambda: self._ensure_exchange(symbol))
 
         try:
             raw = await loop.run_in_executor(
