@@ -20,12 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.paths import DATA_DIR
 from utils.logger import get_logger
 
 _log = get_logger(__name__, component="session")
 
-# Session file lives next to the application root
-SESSION_PATH = Path(__file__).resolve().parent.parent / "session.json"
+# Session file of this bot instance (repository root unless TRADER_DATA_DIR)
+SESSION_PATH = DATA_DIR / "session.json"
 
 
 @dataclass(frozen=True, slots=True)

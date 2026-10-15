@@ -31,13 +31,14 @@ from pathlib import Path
 import pandas as pd
 
 from core.backtest_engine import ReplaySegment
+from core.paths import DATA_DIR
 from core.types import BarData
 from utils.logger import get_logger
 
 _log = get_logger(__name__, component="bar_log")
 
-# Lives next to session.json at the application root
-BAR_LOG_PATH = Path(__file__).resolve().parent.parent / "live_bars.csv"
+# Lives next to session.json (repository root unless TRADER_DATA_DIR)
+BAR_LOG_PATH = DATA_DIR / "live_bars.csv"
 
 _FIELDS = ("timestamp", "open", "high", "low", "close", "volume", "kind", "seg")
 

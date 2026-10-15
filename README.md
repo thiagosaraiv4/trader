@@ -201,9 +201,38 @@ Os trades ficam em `maker_trades.csv` (coluna `variant`); um arquivo da versão 
 essa coluna, é movido para `maker_trades_v1.csv`. Deixe rodar 1–2 semanas antes de concluir. A taxa maker
 zero do BTC/FDUSD é promocional ("até segunda ordem"); confira antes de qualquer teste real.
 
+### Mais moedas (ETH, SOL, BNB)
+
+A trend_v4 roda em outras moedas com os **mesmos parâmetros** do BTC (nada ajustado por moeda),
+cada uma num robô separado com sua própria conta de papel de US$ 10.000:
+
+```bash
+bash scripts/install_coin.sh ETH SOL BNB        # serviços trading-bot-eth, -sol, -bnb
+tail -f logs/bot-eth.log                        # log de uma moeda
+sudo systemctl disable --now trading-bot-sol    # desligar uma moeda
+TRADER_SYMBOL=ETH/USDT TRADER_DATA_DIR=bots/eth .venv/bin/python run_comparison.py   # ao vivo × backtest
+```
+
+Cada moeda guarda `session.json`, `live_bars.csv` e `archive/` em `bots/<moeda>/` e usa o
+`strategy.json` da raiz (um `bots/<moeda>/strategy.json` dá parâmetros próprios a ela). O robô
+do BTC continua na raiz, sem mudança. Um robô se recusa a abrir a sessão de outra moeda.
+
+Backtest de 6 anos (out/2020 → out/2026, candles 4h da Binance, taxas incluídas):
+
+| Moeda | Trades | Retorno | Fator de lucro líq. | Queda máx. | Blocos de 2 anos com lucro |
+|---|---|---|---|---|---|
+| BTC | 153 | +99,6% | 1,54 | 12,6% | 3 de 3 |
+| ETH | 166 | +72,4% | 1,41 | 14,7% | 3 de 3 |
+| BNB | 165 | +88,1% | 1,41 | 22,6% | 3 de 3 |
+| SOL | 172 | +37,5% | 1,25 | 17,9% | 3 de 3 (o mais fraco) |
+
+As moedas sobem e caem juntas: os robôs tendem a comprar na mesma alta e perder na mesma
+queda. Somadas numa conta só, seriam ~4 × 2% de risco ao mesmo tempo — para dinheiro real,
+dividir o risco por trade entre as moedas.
+
 ### Painel web (estilo plataforma de trading)
 
-`dashboard.py` abre um painel no navegador com gráfico de candles do robô (canal de Donchian,
+`dashboard.py` abre um painel no navegador (uma aba por moeda, mais o total da carteira) com gráfico de candles do robô (canal de Donchian,
 média, marcações de compra/venda, linhas de entrada e stop), patrimônio, desempenho, posição,
 parâmetros, trades, relatórios do scanner e do maker, logs e status dos serviços. Atualiza a cada
 30 s. **Só leitura**: não envia ordens nem altera os robôs. Usa só o que já está instalado

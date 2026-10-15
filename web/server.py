@@ -6,7 +6,8 @@ HTTP server of the web panel (aiohttp, already installed with ccxt).
     /                    panel (static/index.html)
     /login, /logout      password login (only when a password is set)
     /api/v1/...          JSON API — the same endpoints a future app or
-                         multi-user product would use
+                         multi-user product would use; ?bot=eth picks a
+                         coin (default btc), /api/v1/bots lists them
     /api/v1/health       liveness, never needs login
 
 Read-only by design: nothing here changes the bots, their files or the
@@ -70,14 +71,16 @@ async def _services(app: web.Application) -> dict[str, str]:
     """systemctl is-active for each bot service ('unknown' off systemd),
     cached a few seconds so open tabs don't each spawn a process."""
     cache = app["services_cache"]
+    names = data.services()          # changes when a coin bot is installed
     async with app["services_lock"]:
-        if cache["states"] and time.monotonic() - cache["at"] < _SERVICES_TTL_SEC:
+        if (cache["states"] and tuple(cache["states"]) == names
+                and time.monotonic() - cache["at"] < _SERVICES_TTL_SEC):
             return cache["states"]
         states: list[str] = []
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
-                "systemctl", "is-active", *data.SERVICES,
+                "systemctl", "is-active", *names,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True,                  # own group: killable as a whole
             )
@@ -92,9 +95,9 @@ async def _services(app: web.Application) -> dict[str, str]:
                 except ProcessLookupError:
                     pass
                 await proc.wait()
-        if len(states) != len(data.SERVICES):
-            states = ["unknown"] * len(data.SERVICES)
-        result = dict(zip(data.SERVICES, states))
+        if len(states) != len(names):
+            states = ["unknown"] * len(names)
+        result = dict(zip(names, states))
         cache.update(at=time.monotonic(), states=result)
         return result
 
@@ -297,14 +300,29 @@ async def api_health(request: web.Request) -> web.Response:
 
 
 async def api_status(request: web.Request) -> web.Response:
-    services, beats, system = await asyncio.gather(
-        _services(request.app), asyncio.to_thread(data.heartbeats), asyncio.to_thread(data.system_info))
+    services, beats, system, bots = await asyncio.gather(
+        _services(request.app), asyncio.to_thread(data.heartbeats),
+        asyncio.to_thread(data.system_info), asyncio.to_thread(data.bots))
     return _json({"time": time.time(), "services": services, "heartbeats": beats,
-                  "system": system, "login": request.app["auth"].enabled})
+                  "system": system, "login": request.app["auth"].enabled,
+                  "bots": [{k: b[k] for k in ("id", "log", "service")} for b in bots]})
+
+
+def _bot(request: web.Request) -> dict:
+    """The bot named by ?bot= (default btc); 404 for an unknown one."""
+    try:
+        return data.get_bot(request.query.get("bot", "btc"))
+    except KeyError:
+        raise web.HTTPNotFound(text=json.dumps({"error": "robô desconhecido"}),
+                               content_type="application/json") from None
+
+
+async def api_bots(request: web.Request) -> web.Response:
+    return _json(await asyncio.to_thread(data.bots_summary))
 
 
 async def api_bot(request: web.Request) -> web.Response:
-    return _json(await asyncio.to_thread(data.bot_overview))
+    return _json(await asyncio.to_thread(data.bot_overview, _bot(request)))
 
 
 async def api_candles(request: web.Request) -> web.Response:
@@ -312,7 +330,7 @@ async def api_candles(request: web.Request) -> web.Response:
         limit = int(request.query.get("limit", "500"))
     except ValueError:
         return _json({"error": "limit inválido"}, status=400)
-    return _json(await asyncio.to_thread(data.candles, limit))
+    return _json(await asyncio.to_thread(data.candles, limit, _bot(request)))
 
 
 async def api_scanner(request: web.Request) -> web.Response:
@@ -351,6 +369,7 @@ def create_app(password: str | None = None,
     app.router.add_get("/logout", logout)
     app.router.add_get("/api/v1/health", api_health)
     app.router.add_get("/api/v1/status", api_status)
+    app.router.add_get("/api/v1/bots", api_bots)
     app.router.add_get("/api/v1/bot", api_bot)
     app.router.add_get("/api/v1/candles", api_candles)
     app.router.add_get("/api/v1/scanner", api_scanner)

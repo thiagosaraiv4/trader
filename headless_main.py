@@ -37,6 +37,7 @@ from core.strategy_factory import build_indicator_engine, create_strategy
 from core.bar_log import BAR_LOG_PATH, append_bars, bars_from_dataframe, new_run_id
 from core.config import AppConfig
 from core.paper_trading import OrderRequest, PaperTradingCore, PositionSnapshot, TradeResult
+from core.paths import DATA_DIR
 from core.session import SESSION_PATH, load_session, save_session
 from core.strategy_params import InvalidParams, StrategyParams, load_params
 from core.types import BarData, FeedConfig, FeedStateChange, ProviderID, Timeframe
@@ -111,6 +112,13 @@ class HeadlessTradingBot:
                 "session_unreadable — starting fresh",
                 extra={"component": "headless", "reason": str(archive)},
             )
+        if session is not None:
+            other = _session_symbol(session)
+            if other and other != str(cfg.default_symbol):
+                # Never trade one coin's position or results as another's
+                raise WrongSymbol(
+                    f"{SESSION_PATH} belongs to {other}, this bot trades {cfg.default_symbol} "
+                    "(check TRADER_SYMBOL / TRADER_DATA_DIR of the service)")
         if session is not None and self._params_changed(session.meta):
             # Different parameters = a different experiment: start a clean
             # session so live results and run_comparison.py stay meaningful.
@@ -433,6 +441,7 @@ class HeadlessTradingBot:
             open_position=state["open_position"],
             trade_log=state["trade_log"],
             meta={
+                "symbol": str(self._cfg.default_symbol),
                 "strategy_params": self._params.to_dict(),
                 "breaker": {
                     "baseline": self._algo_engine.initial_session_balance,
@@ -563,9 +572,19 @@ async def run() -> None:
     await bot.run()
 
 
+class WrongSymbol(Exception):
+    """session.json in this folder is from a bot of another coin."""
+
+
+def _session_symbol(session: Any) -> str | None:
+    """Coin a saved session traded (meta, else its open position), if known."""
+    sym = (session.meta or {}).get("symbol") or (session.position or {}).get("symbol")
+    return str(sym) if sym else None
+
+
 def _archive_run() -> Path:
     """Move session.json and live_bars.csv to archive/<UTC time>/."""
-    dest = Path(__file__).resolve().parent / "archive" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest = DATA_DIR / "archive" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dest.mkdir(parents=True, exist_ok=True)
     for path in (SESSION_PATH, BAR_LOG_PATH):
         if path.exists():
@@ -586,7 +605,8 @@ def _acquire_instance_lock() -> TextIO | None:
     except ImportError:
         return open(os.devnull, "w")
 
-    lock_file = open(Path(__file__).resolve().parent / "session.lock", "w")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    lock_file = open(DATA_DIR / "session.lock", "w")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -607,6 +627,9 @@ def main() -> None:
 
     try:
         asyncio.run(run())
+    except WrongSymbol as e:
+        log.error("wrong_symbol — bot NOT started", extra={"component": "headless", "error": str(e)})
+        sys.exit(2)
     except InvalidParams as e:
         # Never trade with a fallback strategy: stop until strategy.json is fixed.
         # Exit code 2 = configuration error (systemd does not restart on it).

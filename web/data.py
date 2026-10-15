@@ -9,6 +9,10 @@ little memory next to the bots on a 1 GB VM.
 Every function tolerates missing, half-written or corrupt files (the bots
 may be writing them at the same moment) and returns empty data instead of
 raising. Reads are bounded: big files are read from the end, in chunks.
+
+Bots: the BTC bot keeps its files at the repository root (service
+trading-bot, logs/bot.log); each extra coin from scripts/install_coin.sh has
+a folder bots/<id>/ (service trading-bot-<id>, logs/bot-<id>.log).
 """
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ import csv
 import json
 import math
 import os
+import re
 import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -23,12 +28,13 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-SESSION_PATH = ROOT / "session.json"
-BARS_PATH = ROOT / "live_bars.csv"
 PARAMS_PATH = ROOT / "strategy.json"
 LOG_DIR = ROOT / "logs"
-LOGS = {"bot": "bot.log", "scanner": "scanner.log", "maker": "maker.log"}
-SERVICES = ("trading-bot", "pair-scanner", "maker-bot")
+BOTS_DIR = ROOT / "bots"
+# Research tools, besides the trading bots
+TOOL_LOGS = {"scanner": "scanner.log", "maker": "maker.log"}
+TOOL_SERVICES = ("pair-scanner", "maker-bot")
+_BOT_ID = re.compile(r"^[a-z0-9]{2,10}$")
 INITIAL_BALANCE = 10_000.0
 # Heartbeats are every 5 min; older than this means the bot is not alive
 STALE_HEARTBEAT_SEC = 15 * 60
@@ -171,15 +177,64 @@ def _last_event(path: Path, event: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# bot instances
+# ---------------------------------------------------------------------------
+
+def bots() -> list[dict]:
+    """Every trading bot: BTC at the root, then bots/<id>/ in name order."""
+    out = [{"id": "btc", "dir": ROOT, "log": "bot", "service": "trading-bot"}]
+    try:
+        dirs = sorted(d for d in BOTS_DIR.iterdir()
+                      if d.is_dir() and _BOT_ID.match(d.name) and d.name != "btc")
+    except OSError:
+        dirs = []
+    for d in dirs:
+        out.append({"id": d.name, "dir": d, "log": f"bot-{d.name}",
+                    "service": f"trading-bot-{d.name}"})
+    return out
+
+
+def get_bot(bot_id: str | None = None) -> dict:
+    """One bot by id (default BTC); KeyError if there is no such bot."""
+    for b in bots():
+        if b["id"] == (bot_id or "btc"):
+            return b
+    raise KeyError(bot_id)
+
+
+def log_files() -> dict[str, str]:
+    """Readable logs: one per bot (bot, bot-eth, ...) plus the tools'."""
+    return {b["log"]: b["log"] + ".log" for b in bots()} | TOOL_LOGS
+
+
+def services() -> tuple[str, ...]:
+    return tuple(b["service"] for b in bots()) + TOOL_SERVICES
+
+
+def _session(b: dict) -> dict | None:
+    return _read_json(b["dir"] / "session.json")
+
+
+def _symbol(b: dict) -> str:
+    """Coin of a bot: its session, else its last start, else the folder name."""
+    sym = _dict(_dict(_session(b)).get("meta")).get("symbol")
+    if not sym:
+        sym = (_last_event(LOG_DIR / (b["log"] + ".log"), "bot_started") or {}).get("symbol")
+    return str(sym or f"{b['id'].upper()}/USDT")
+
+
+# ---------------------------------------------------------------------------
 # strategy / session
 # ---------------------------------------------------------------------------
 
-def strategy_params() -> dict:
-    """Parameters of the live session (session meta), else strategy.json."""
-    stored = _dict(_dict(_dict(_read_json(SESSION_PATH)).get("meta")).get("strategy_params"))
+def strategy_params(b: dict | None = None) -> dict:
+    """Parameters of the live session (session meta), else the bot's own
+    strategy.json, else the repository's."""
+    b = b or get_bot()
+    stored = _dict(_dict(_dict(_session(b)).get("meta")).get("strategy_params"))
     if stored:
         return stored
-    return _read_json(PARAMS_PATH) or {}
+    return _read_json(b["dir"] / "strategy.json") or _read_json(PARAMS_PATH) or {}
 
 
 def _pair_fills(trade_log: list[dict]) -> tuple[list[dict], dict | None]:
@@ -242,13 +297,15 @@ def _metrics(trips: list[dict]) -> dict:
     }
 
 
-def bot_overview() -> dict:
-    """Session, position, trades, metrics and equity curve of the main bot."""
-    session = _read_json(SESSION_PATH)
-    hb = _last_event(LOG_DIR / LOGS["bot"], "heartbeat")
-    params = strategy_params()
+def bot_overview(b: dict | None = None) -> dict:
+    """Session, position, trades, metrics and equity curve of one bot."""
+    b = b or get_bot()
+    session = _session(b)
+    hb = _last_event(LOG_DIR / (b["log"] + ".log"), "heartbeat")
+    params = strategy_params(b)
     if session is None:
-        return {"available": False, "params": params, "heartbeat": hb}
+        return {"available": False, "id": b["id"], "symbol": _symbol(b),
+                "params": params, "heartbeat": hb}
     log = _trade_log(session)
     trades = round_trips(log)
     balance = _num(session.get("balance")) or 0.0
@@ -275,6 +332,8 @@ def bot_overview() -> dict:
     curve = [p for p in curve if p["time"] is not None]
     return {
         "available": True,
+        "id": b["id"],
+        "symbol": _symbol(b),
         "params": params,
         "heartbeat": hb,
         "balance": balance,
@@ -306,10 +365,33 @@ def _int(x: Any, default: int) -> int:
         return default
 
 
-def _bar_fields() -> int:
+def bots_summary() -> dict:
+    """One line per bot for the coin selector, plus the combined account."""
+    rows = []
+    for b in bots():
+        o = bot_overview(b)
+        hb = o.get("heartbeat")
+        ts = _epoch(hb.get("timestamp")) if hb else None
+        equity = o.get("equity") if o.get("available") else None
+        rows.append({
+            "id": b["id"], "symbol": o["symbol"], "service": b["service"], "log": b["log"],
+            "equity": equity,
+            "return_pct": (equity / INITIAL_BALANCE - 1) if equity is not None else None,
+            "position": (o.get("position") or {}).get("side") if o.get("available") else None,
+            "trades": (o.get("metrics") or {}).get("trades", 0),
+            "fresh": ts is not None and time.time() - ts < STALE_HEARTBEAT_SEC,
+        })
+    live = [r for r in rows if r["equity"] is not None]
+    total = sum(r["equity"] for r in live)
+    return {"bots": rows,
+            "total": {"equity": total if live else None, "accounts": len(live),
+                      "return_pct": total / (INITIAL_BALANCE * len(live)) - 1 if live else None}}
+
+
+def _bar_fields(path: Path) -> int:
     """8 columns (with kind/seg); legacy files from before that have 6."""
     try:
-        with open(BARS_PATH, encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             header = fh.readline(4096)
     except OSError:
         return 8
@@ -331,21 +413,23 @@ def _parse_bar(line: str, fields: int) -> dict | None:
     return {"time": t, "open": o, "high": h, "low": lo, "close": c}
 
 
-def candles(limit: int = 500) -> dict:
+def candles(limit: int = 500, b: dict | None = None) -> dict:
     """
     Closed bars the live bot traded on (live_bars.csv), oldest first, with
     the strategy's indicators and the trade markers.
     """
+    b = b or get_bot()
+    bars_path = b["dir"] / "live_bars.csv"
     limit = max(10, min(int(limit), 2000))
-    params = strategy_params()
+    params = strategy_params(b)
     tf = str(params.get("timeframe", "4h"))
     want = limit + _indicator_warmup(params)
-    fields = _bar_fields()
+    fields = _bar_fields(bars_path)
     # Read backwards until enough distinct bars: every restart re-appends a
     # 200-bar warm-up snapshot, so a fixed line count would come up short.
     # The newest row of a bar wins.
     bars: dict[float, dict] = {}
-    for line in _reverse_lines(BARS_PATH):
+    for line in _reverse_lines(bars_path):
         if line.startswith("timestamp"):
             continue
         bar = _parse_bar(line, fields)
@@ -359,10 +443,10 @@ def candles(limit: int = 500) -> dict:
     first = series[0]["time"] if series else 0
     for name in indicators:
         indicators[name] = [p for p in indicators[name] if p["time"] >= first]
-    trips, pending = _pair_fills(_trade_log(_read_json(SESSION_PATH)))
-    started = _last_event(LOG_DIR / LOGS["bot"], "bot_started") or {}
+    trips, pending = _pair_fills(_trade_log(_session(b)))
     return {
-        "symbol": str(started.get("symbol", "BTC/USDT")),
+        "id": b["id"],
+        "symbol": _symbol(b),
         "strategy": params.get("strategy", "trend_v4"),
         "timeframe": tf,
         "timeframe_sec": _TF_SECONDS.get(tf),
@@ -434,9 +518,10 @@ def _markers(trips: list[dict], pending: dict | None, first: float) -> list[dict
 # ---------------------------------------------------------------------------
 
 def heartbeats() -> dict:
+    """Last heartbeat of every bot and tool, keyed by log name."""
     now = time.time()
     out = {}
-    for name, file in LOGS.items():
+    for name, file in log_files().items():
         hb = _last_event(LOG_DIR / file, "heartbeat")
         ts = _epoch(hb.get("timestamp")) if hb else None
         age = now - ts if ts is not None else None
@@ -469,7 +554,7 @@ def system_info() -> dict:
 
 def log_tail(name: str, lines: int = 100) -> list[str]:
     """Last lines of one bot's log (only the known log files can be read)."""
-    file = LOGS.get(name)
+    file = log_files().get(name)
     if file is None:
         raise KeyError(name)
     return tail_lines(LOG_DIR / file, max_lines=max(1, min(int(lines), 1000)))

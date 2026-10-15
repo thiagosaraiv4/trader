@@ -13,6 +13,7 @@
   <header class="topbar">
     <div class="brand">Trader <small>paper trading</small></div>
     <div class="ticker"><span class="sym" id="sym">—</span><span class="px" id="px">—</span></div>
+    <nav class="bot-tabs" id="bot-tabs" aria-label="Moedas"></nav>
     <div class="pills" id="pills" aria-label="Status dos robôs"></div>
     <span class="updated" id="updated" aria-live="polite"></span>
     <a class="logout" id="logout" href="/logout" hidden>Sair</a>
@@ -59,11 +60,7 @@
       <div class="tab-panel" role="tabpanel" id="tab-scanner" aria-labelledby="t-scanner" hidden></div>
       <div class="tab-panel" role="tabpanel" id="tab-maker" aria-labelledby="t-maker" hidden></div>
       <div class="tab-panel" role="tabpanel" id="tab-logs" aria-labelledby="t-logs" hidden>
-        <div class="log-select" id="log-select">
-          <button data-log="bot" aria-pressed="true">Robô principal</button>
-          <button data-log="scanner" aria-pressed="false">Scanner</button>
-          <button data-log="maker" aria-pressed="false">Maker</button>
-        </div>
+        <div class="log-select" id="log-select"></div>
         <div class="log" id="log"></div>
       </div>
       <div class="tab-panel" role="tabpanel" id="tab-system" aria-labelledby="t-system" hidden></div>

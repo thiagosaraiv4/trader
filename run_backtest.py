@@ -207,7 +207,7 @@ def _net_pnls(result: BacktestResult, initial: float) -> list[float]:
     return pnls
 
 
-def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -> None:
+def _print_report(result: BacktestResult, bars: list[BarData], initial: float, symbol: str) -> None:
     print(result.summary())
     if result.halted_at is not None:
         print(f"  [!] Circuit breaker disparou em {result.halted_at:%Y-%m-%d %H:%M} UTC: "
@@ -232,7 +232,7 @@ def _print_report(result: BacktestResult, bars: list[BarData], initial: float) -
         net_pf = (sum(net_wins) / abs(sum(net_losses))) if net_losses else float("inf")
         print(f"  Win rate líq.:   {len(net_wins) / len(net_pnls):.1%} (após taxas; o Win Rate acima é bruto)")
         print(f"  Profit factor líq.: {net_pf:.2f}")
-    print(f"  Buy & hold BTC:  {buy_hold:.2%} no mesmo período")
+    print(f"  Buy & hold {symbol.split('/')[0]}:  {buy_hold:.2%} no mesmo período")
     print("=" * 60)
 
     if not result.trade_log:
@@ -594,7 +594,7 @@ def main() -> None:
     )
     result = engine.run()
     result.data_source = f"ccxt/{args.exchange}"
-    _print_report(result, bars, args.balance)
+    _print_report(result, bars, args.balance, args.symbol)
 
 
 if __name__ == "__main__":

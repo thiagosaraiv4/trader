@@ -48,3 +48,6 @@ scanner_stats.tmp
 
 # Web panel password (dashboard.py)
 .panel_password
+
+# Extra coin bots (scripts/install_coin.sh): session, bars, archive
+bots/

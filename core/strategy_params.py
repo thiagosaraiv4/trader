@@ -15,12 +15,16 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from core.paths import DATA_DIR, ROOT
 from core.types import Timeframe
 from utils.logger import get_logger
 
 _log = get_logger(__name__, component="strategy_params")
 
-PARAMS_PATH = Path(__file__).resolve().parent.parent / "strategy.json"
+# A bot instance with its own folder (TRADER_DATA_DIR) may have its own
+# strategy.json; otherwise every coin trades the repository's strategy.json
+_OWN_PARAMS = DATA_DIR / "strategy.json"
+PARAMS_PATH = _OWN_PARAMS if DATA_DIR != ROOT and _OWN_PARAMS.exists() else ROOT / "strategy.json"
 
 
 STRATEGIES = ("ma_cross_v3", "trend_v4")

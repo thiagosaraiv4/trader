@@ -9,9 +9,16 @@ No business logic — pure data.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 from core.types import ProviderID, Symbol, Timeframe
+
+
+def _env_symbol() -> Symbol:
+    """TRADER_SYMBOL (e.g. ETH/USDT) picks the coin of this bot instance."""
+    raw = os.environ.get("TRADER_SYMBOL", "").strip()
+    return Symbol.from_string(raw) if raw else Symbol("BTC", "USDT")
 
 
 @dataclass(frozen=True)
@@ -22,7 +29,7 @@ class AppConfig:
     Instantiated once in main.py and passed to subsystems that need it.
     Frozen to prevent accidental mutation at runtime.
     """
-    default_symbol: Symbol           = Symbol("BTC", "USDT")
+    default_symbol: Symbol           = field(default_factory=_env_symbol)
     default_timeframe: Timeframe     = Timeframe.M1
     default_provider: ProviderID     = ProviderID.BINANCE
     snapshot_limit: int              = 200

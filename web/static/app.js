@@ -263,31 +263,117 @@ function renderEquity(curve) {
 }
 
 // ---------------------------------------------------------------- panels
-const SERVICE_NAMES = { "trading-bot": "Robô principal", "pair-scanner": "Scanner", "maker-bot": "Maker" };
-const HB_FOR = { "trading-bot": "bot", "pair-scanner": "scanner", "maker-bot": "maker" };
+const TOOLS = { "pair-scanner": { name: "Scanner", log: "scanner" }, "maker-bot": { name: "Maker", log: "maker" } };
+
+// "trading-bot" → BTC, "trading-bot-eth" → ETH, research tools by name
+function serviceName(svc) {
+  if (TOOLS[svc]) return TOOLS[svc].name;
+  if (svc === "trading-bot") return "BTC";
+  return svc.replace(/^trading-bot-/, "").toUpperCase();
+}
+
+function serviceLog(s, svc) {
+  if (TOOLS[svc]) return TOOLS[svc].log;
+  const b = (s.bots || []).find((x) => x.service === svc);
+  return b ? b.log : null;
+}
 
 function renderStatus(s) {
   const pills = $("pills");
   pills.replaceChildren();
   for (const [svc, state] of Object.entries(s.services)) {
-    const hb = s.heartbeats[HB_FOR[svc]];
+    const hb = s.heartbeats[serviceLog(s, svc)];
     let cls = "", label;
     if (state === "active") {
       cls = hb && hb.fresh ? "ok" : "warn";
       label = hb && hb.fresh ? "rodando" : "sem sinal recente";
     } else if (state === "failed") { cls = "bad"; label = "falhou"; }
-    else if (state === "inactive") { label = "desligado"; }
+    else if (state === "inactive") {
+      if (TOOLS[svc]) continue;                     // research tool switched off: not news
+      label = "desligado";
+    }
     else if (hb && hb.fresh) { cls = "ok"; label = "ativo"; }
     else if (hb && hb.heartbeat) { cls = "warn"; label = "parado?"; }
     else continue;                                  // never installed here
     pills.append(el("span", { cls: `pill ${cls}`, title: `${svc}: ${state}` },
-      [el("span", { cls: "dot" }), `${SERVICE_NAMES[svc]}: ${label}`]));
+      [el("span", { cls: "dot" }), `${serviceName(svc)}: ${label}`]));
   }
   $("logout").hidden = !s.login;
-  const hb = s.heartbeats.bot && s.heartbeats.bot.heartbeat;
-  if (hb && hb.price != null) $("px").textContent = fmtNum(hb.price);
+  renderLogButtons(s);
   if (activeTab === "tab-system") renderSystem(s);
   lastStatus = s;
+}
+
+// ---------------------------------------------------------------- coins
+let currentBot = "btc", botGen = 0;
+
+function readBotChoice() {
+  const fromHash = decodeURIComponent(location.hash.slice(1));
+  if (/^[a-z0-9]{2,10}$/.test(fromHash)) return fromHash;
+  try { return localStorage.getItem("trader.bot") || "btc"; } catch (_) { return "btc"; }
+}
+
+function selectBot(id) {
+  if (id === currentBot) return;
+  currentBot = id;
+  botGen++;                                         // drop answers for the old coin
+  try { localStorage.setItem("trader.bot", id); } catch (_) { /* private mode */ }
+  history.replaceState(null, "", "#" + id);
+  priceFitted = false; equityPoints = -1; lastCandles = null;
+  activeLog = id === "btc" ? "bot" : `bot-${id}`;
+  refresh();
+}
+
+function renderBots(d) {
+  const nav = $("bot-tabs");
+  nav.replaceChildren();
+  if (!d.bots.some((b) => b.id === currentBot)) setTimeout(() => selectBot("btc"), 0);   // unknown coin
+  for (const b of d.bots) {
+    const base = b.symbol.split("/")[0];
+    const btn = el("button", {
+      type: "button", "aria-pressed": String(b.id === currentBot),
+      title: `${b.symbol} · ${b.trades} trades · ${b.position === "LONG" ? "comprado" : "sem posição"}` +
+             (b.fresh ? "" : " · sem sinal recente"),
+    }, [
+      el("span", { cls: `dot ${b.fresh ? "ok" : "warn"}` }),
+      el("b", { text: base }),
+      b.position === "LONG" ? el("span", { cls: "held", text: "●", title: "comprado" }) : null,
+      el("span", { cls: signCls(b.return_pct), text: fmtPct(b.return_pct, 1) }),
+    ]);
+    btn.addEventListener("click", () => selectBot(b.id));
+    nav.append(btn);
+  }
+  if (d.total.accounts > 1) {
+    nav.append(el("span", { cls: "total", title: `${d.total.accounts} contas de US$ 10.000` }, [
+      "Carteira ", el("b", { text: fmtUsd(d.total.equity, 0) }), " ",
+      el("span", { cls: signCls(d.total.return_pct), text: fmtPct(d.total.return_pct, 1) }),
+    ]));
+  }
+}
+
+let logButtonsKey = "";
+
+function renderLogButtons(s) {
+  const names = (s.bots || []).map((b) => [b.log, serviceName(b.service)])
+    .concat([["scanner", "Scanner"], ["maker", "Maker"]]);
+  const key = names.map((n) => n[0]).join(",");
+  if (key !== logButtonsKey) {
+    logButtonsKey = key;
+    const box = $("log-select");
+    box.replaceChildren();
+    for (const [log, label] of names) {
+      const b = el("button", { type: "button", "data-log": log, text: label });
+      b.addEventListener("click", () => { activeLog = log; markLogButtons(); renderLogs().catch(console.warn); });
+      box.append(b);
+    }
+  }
+  markLogButtons();
+}
+
+function markLogButtons() {
+  for (const o of document.querySelectorAll("#log-select button")) {
+    o.setAttribute("aria-pressed", String(o.dataset.log === activeLog));
+  }
 }
 
 function tile(label, value, hint, cls = "") {
@@ -299,6 +385,9 @@ function tile(label, value, hint, cls = "") {
 }
 
 function renderBot(b) {
+  const hbPrice = b.heartbeat && b.heartbeat.price;
+  $("px").textContent = hbPrice != null ? fmtNum(hbPrice) : "—";
+  $("sym").textContent = b.symbol || "—";
   const tiles = $("tiles");
   tiles.replaceChildren();
   if (!b.available) {
@@ -458,8 +547,8 @@ function renderSystem(s) {
   const sys = s.system || {};
   const gb = (b) => (b == null ? "—" : `${nf(0).format(b / 1048576)} MB`);
   const svcRows = Object.entries(s.services).map(([svc, state]) => {
-    const hb = s.heartbeats[HB_FOR[svc]];
-    return [SERVICE_NAMES[svc], state, hb && hb.age_sec != null ? "há " + fmtAge(hb.age_sec) : "—"];
+    const hb = s.heartbeats[serviceLog(s, svc)];
+    return [`${serviceName(svc)} (${svc})`, state, hb && hb.age_sec != null ? "há " + fmtAge(hb.age_sec) : "—"];
   });
   panel.append(table(["Serviço", "systemd", "Último heartbeat"], svcRows));
   const kv = el("dl", { cls: "kv" });
@@ -508,16 +597,21 @@ function showCandlesError(e) {
 // Each part loads and renders on its own: one failing endpoint must not
 // blank or freeze the rest of the panel
 const PARTS = [
-  { path: "status", label: "status", render: renderStatus, fail: showStatusError },
-  { path: "candles?limit=500", label: "gráfico", render: renderCandles, fail: showCandlesError },
-  { path: "bot", label: "robô", render: (b) => { $("perf-sub").textContent = "desde o início da sessão"; renderBot(b); },
+  { path: () => "status", label: "status", render: renderStatus, fail: showStatusError },
+  { path: () => "bots", label: "moedas", render: renderBots, fail: () => {} },
+  { path: () => `candles?limit=500&bot=${encodeURIComponent(currentBot)}`, label: "gráfico",
+    render: renderCandles, fail: showCandlesError },
+  { path: () => `bot?bot=${encodeURIComponent(currentBot)}`, label: "robô",
+    render: (b) => { $("perf-sub").textContent = "desde o início da sessão"; renderBot(b); },
     fail: showBotError },
 ];
 
 async function refresh() {
   document.body.classList.add("loading");
+  const gen = botGen;
   try {
-    const results = await Promise.allSettled(PARTS.map((part) => api(part.path)));
+    const results = await Promise.allSettled(PARTS.map((part) => api(part.path())));
+    if (gen !== botGen) return;                     // the coin changed meanwhile
     const bad = [];
     results.forEach((r, i) => {
       const part = PARTS[i];
@@ -555,13 +649,10 @@ function init() {
   }
   initCharts();
   for (const b of document.querySelectorAll('[role="tab"]')) b.addEventListener("click", () => selectTab(b));
-  for (const b of document.querySelectorAll("#log-select button")) {
-    b.addEventListener("click", () => {
-      activeLog = b.dataset.log;
-      for (const o of document.querySelectorAll("#log-select button")) o.setAttribute("aria-pressed", String(o === b));
-      renderLogs().catch(console.warn);
-    });
-  }
+  currentBot = readBotChoice();
+  activeLog = currentBot === "btc" ? "bot" : `bot-${currentBot}`;
+  // Editing the #coin in the address bar (or Back) switches coin too
+  window.addEventListener("hashchange", () => selectBot(readBotChoice()));
   refresh();
   setInterval(refresh, REFRESH_MS);
   setInterval(tickUpdated, 1000);
