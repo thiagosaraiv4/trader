@@ -55,6 +55,10 @@ for UNIT in $(systemctl list-unit-files --type=service --no-legend 'trading-bot.
     esac
 done
 
+# Logs written by the old units' StandardOutput= were created by systemd as
+# root; the coins now append to them as ${RUN_USER}
+sudo chown "${RUN_USER}:" "${REPO_DIR}"/logs/*.log 2>/dev/null || true
+
 echo "==> ${SERVICE}: ${COINS}"
 sudo tee "/etc/systemd/system/${SERVICE}.service" >/dev/null <<UNIT
 [Unit]

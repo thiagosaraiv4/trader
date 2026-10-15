@@ -688,7 +688,14 @@ def _route_logs_per_coin(bot_ids: list[str]) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     for bot_id in bot_ids:
-        handler = logging.FileHandler(_coin_log(bot_id), encoding="utf-8")
+        try:
+            handler = logging.FileHandler(_coin_log(bot_id), encoding="utf-8")
+        except OSError as e:
+            # e.g. a log created by an old root-owned systemd unit: the coin
+            # still trades, its lines stay in logs/bots.log
+            log.error("coin_log_unwritable — lines only in bots.log",
+                      extra={"component": "headless", "coin": bot_id, "error": str(e)})
+            continue
         handler.setLevel(logging.INFO)
         handler.setFormatter(JsonLineFormatter())
         handler.addFilter(lambda rec, b=bot_id: getattr(rec, "bot", None) == b)
