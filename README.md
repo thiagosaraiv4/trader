@@ -218,7 +218,13 @@ ssh -i CHAVE.key -L 8080:127.0.0.1:8080 ubuntu@IP_DA_VM
 
 Por padrão o painel só escuta na própria VM e o acesso é pelo túnel SSH (criptografado, sem abrir
 portas). Para escutar na rede (`--host 0.0.0.0`) é obrigatório ter senha (`TRADER_PANEL_PASSWORD`
-ou arquivo `.panel_password`, mínimo 10 caracteres) — sem HTTPS, prefira o túnel.
+ou arquivo `.panel_password`, mínimo 10 caracteres) e dizer o IP/domínio usado no navegador com
+`--allowed-host` — sem HTTPS, prefira o túnel.
+
+Proteções: só aceita os nomes `localhost`/`127.0.0.1` (mais os de `--allowed-host`), o que barra
+sites que tentam ler o painel pelo túnel ("DNS rebinding"); o login bloqueia um endereço após 10
+senhas erradas e todo mundo após 100 em 15 min; o serviço systemd roda com o disco inteiro em
+somente leitura para o painel, então uma falha nele não altera o código nem os dados dos robôs.
 
 A API JSON (`/api/v1/status`, `/bot`, `/candles`, `/scanner`, `/maker`, `/logs/{bot,scanner,maker}`)
 é a mesma que um app ou uma versão multiusuário usaria no futuro.

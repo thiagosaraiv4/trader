@@ -16,8 +16,11 @@ e abrir http://localhost:8080 no navegador.
 
 Para escutar em todas as interfaces (--host 0.0.0.0) é obrigatório definir
 uma senha — em TRADER_PANEL_PASSWORD ou no arquivo .panel_password (fora do
-git) — e abrir a porta no firewall da nuvem. Sem HTTPS a senha trafega em
-texto: prefira o túnel SSH.
+git) —, informar o endereço usado no navegador com --allowed-host (IP ou
+domínio; outros nomes são recusados para barrar "DNS rebinding") e abrir a
+porta no firewall da nuvem. Sem HTTPS a senha trafega em texto: prefira o
+túnel SSH.
+    python dashboard.py --host 0.0.0.0 --allowed-host 203.0.113.7
 """
 from __future__ import annotations
 
@@ -53,22 +56,39 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def _is_unspecified(host: str) -> bool:
+    """0.0.0.0 / :: (all interfaces) — no single name to allow."""
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return host == ""
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Painel web dos robôs (só leitura).")
     p.add_argument("--host", default="127.0.0.1", help="padrão: 127.0.0.1 (só esta máquina)")
     p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--allowed-host", action="append", default=[], metavar="NOME",
+                   help="IP ou domínio digitado no navegador, além de localhost "
+                        "(repita para vários; obrigatório com --host 0.0.0.0)")
     args = p.parse_args()
     password = _password()
+    allowed = list(args.allowed_host)
     if not _is_loopback(args.host):
         if not password:
             p.error(f"--host {args.host} expõe o painel na rede: defina uma senha em "
                     f"TRADER_PANEL_PASSWORD ou {PASSWORD_FILE.name}")
         if len(password) < _MIN_PASSWORD:
             p.error(f"senha curta demais (mínimo {_MIN_PASSWORD} caracteres)")
+        if _is_unspecified(args.host) and not allowed:
+            p.error(f"--host {args.host}: informe com --allowed-host o IP ou domínio "
+                    "que você vai digitar no navegador")
+    if not _is_unspecified(args.host):
+        allowed.append(args.host)
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     print(f"Painel em http://{args.host}:{args.port}  (login {'ativo' if password else 'desativado'})",
           flush=True)
-    web.run_app(create_app(password), host=args.host, port=args.port, print=None,
+    web.run_app(create_app(password, allowed), host=args.host, port=args.port, print=None,
                 access_log=None)
 
 

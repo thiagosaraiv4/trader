@@ -176,5 +176,9 @@ footer.foot { color: var(--muted); font-size: 12px; padding: 0 16px 20px; }
   .layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "chart" "side" "equity" "tabs"; }
   #price-chart { height: 360px; }
   .legend { position: static; padding: 0 10px 6px; }
+  .legend .key { flex-wrap: wrap; min-width: 0; }
   .pills { margin-left: 0; }
+  /* log: time and level on one row, the message below at full width */
+  .log .line { grid-template-columns: auto 1fr; }
+  .log .msg { grid-column: 1 / -1; }
 }

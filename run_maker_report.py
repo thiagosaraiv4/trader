@@ -28,9 +28,17 @@ _MIN_TRADES = 30
 def _verdict(pnls: list[float]) -> str:
     n = len(pnls)
     if n < _MIN_TRADES:
-        return f"amostra pequena (<{_MIN_TRADES})"
+        return verdict_from(n, 0.0, 0.0)
     avg = sum(pnls) / n
     sd = math.sqrt(sum((p - avg) ** 2 for p in pnls) / (n - 1))
+    return verdict_from(n, avg, sd)
+
+
+def verdict_from(n: int, avg: float, sd: float) -> str:
+    """Verdict from trade count, mean and sample std of the PnL per trade
+    (the web panel computes these while streaming the CSV)."""
+    if n < _MIN_TRADES:
+        return f"amostra pequena (<{_MIN_TRADES})"
     noise = 3 * sd / math.sqrt(n)
     if avg <= 0:
         return "PERDE"

@@ -5,7 +5,9 @@
 const REFRESH_MS = 30_000;
 const INITIAL = 10_000;
 const LWC = window.LightweightCharts;
-const TZ_SHIFT = -new Date().getTimezoneOffset() * 60;   // charts show local time
+// The chart library draws times as UTC: shift each one by the browser's
+// offset AT THAT DATE, so summer time matches the tables
+const loc = (t) => t - new Date(t * 1000).getTimezoneOffset() * 60;
 
 // ---------------------------------------------------------------- helpers
 const $ = (id) => document.getElementById(id);
@@ -55,8 +57,34 @@ function fmtDuration(sec) {
 async function api(path) {
   const r = await fetch("/api/v1/" + path, { credentials: "same-origin", cache: "no-store" });
   if (r.status === 401) { window.location.href = "/login"; throw new Error("login"); }
-  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  if (!r.ok) throw Object.assign(new Error(`${path}: HTTP ${r.status}`), { status: r.status });
   return r.json();
+}
+
+const failText = (e) => (e && e.status ? `indisponível (HTTP ${e.status})` : "indisponível (sem conexão)");
+
+// Strictly increasing local display time for each (sorted) epoch: in the
+// hour repeated when summer time ends, two bars would get the same label
+function displayTimes(times) {
+  const out = new Map();
+  let last = -Infinity;
+  for (const t of times) {
+    let d = loc(t);
+    if (d <= last) d = last + 1;
+    out.set(t, d);
+    last = d;
+  }
+  return out;
+}
+
+// Index of the last element <= x in a sorted array (-1 if none)
+function lastAtOrBefore(arr, x) {
+  let lo = 0, hi = arr.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] <= x) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return ans;
 }
 
 function table(headers, rows, textCols = []) {
@@ -76,7 +104,7 @@ function table(headers, rows, textCols = []) {
 
 // ---------------------------------------------------------------- charts
 let priceChart, candleSeries, indicatorSeries = {}, priceLines = [];
-let equityChart, equitySeries, equityBase;
+let equityChart, equitySeries, equityBase, equityPoints = -1;
 const SERIES_VARS = ["--series-1", "--series-2", "--series-3"];
 
 function chartOptions() {
@@ -121,38 +149,46 @@ function renderCandles(c) {
   lastCandles = c;
   $("chart-title").textContent = `${c.symbol} · ${c.timeframe}`;
   $("sym").textContent = c.symbol;
-  if (!c.bars.length) {
-    $("chart-sub").textContent = "sem candles gravados ainda (live_bars.csv)";
-    return;
-  }
-  $("chart-sub").textContent = `${c.bars.length} candles fechados que o robô processou`;
-  candleSeries.setData(c.bars.map((b) => ({ ...b, time: b.time + TZ_SHIFT })));
-
-  const names = Object.keys(c.indicators);
+  const names = c.bars.length ? Object.keys(c.indicators) : [];
   for (const name of Object.keys(indicatorSeries)) {
     if (!names.includes(name)) { priceChart.removeSeries(indicatorSeries[name]); delete indicatorSeries[name]; }
   }
+  if (!c.bars.length) {
+    // e.g. the session was just archived: don't keep drawing the old run
+    $("chart-sub").textContent = "sem candles gravados ainda (live_bars.csv)";
+    candleSeries.setMarkers([]);
+    candleSeries.setData([]);
+    updateLegend(null);
+    return;
+  }
+  $("chart-sub").textContent = `${c.bars.length} candles fechados que o robô processou`;
+  const times = c.bars.map((b) => b.time);
+  const disp = displayTimes(times);
+  candleSeries.setData(c.bars.map((b) => ({ ...b, time: disp.get(b.time) })));
+
   names.forEach((name, i) => {
     if (!indicatorSeries[name]) {
       indicatorSeries[name] = priceChart.addLineSeries({
-        color: css(SERIES_VARS[i % SERIES_VARS.length]), lineWidth: 2,
-        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
       });
     }
-    indicatorSeries[name].setData(c.indicators[name].map((p) => ({ time: p.time + TZ_SHIFT, value: p.value })));
+    // Color follows the position in the list every time, like the legend
+    indicatorSeries[name].applyOptions({ color: css(SERIES_VARS[i % SERIES_VARS.length]) });
+    indicatorSeries[name].setData(c.indicators[name].filter((p) => disp.has(p.time))
+      .map((p) => ({ time: disp.get(p.time), value: p.value })));
   });
 
-  // Markers sit on the bar where the fill happened
-  const tf = c.timeframe_sec || 60;
-  const barTimes = new Set(c.bars.map((b) => b.time));
+  // Each fill sits on the last bar that opened at or before it, so a fill
+  // inside the still-forming bar shows on the newest closed bar
   const markers = [];
   for (const m of c.markers) {
-    const t = Math.floor(m.time / tf) * tf;
-    if (!barTimes.has(t)) continue;
+    const i = lastAtOrBefore(times, m.time);
+    if (i < 0) continue;
+    const t = disp.get(times[i]);
     if (m.kind === "entry") {
-      markers.push({ time: t + TZ_SHIFT, position: "belowBar", shape: "arrowUp", color: css("--series-1"), text: "C" });
+      markers.push({ time: t, position: "belowBar", shape: "arrowUp", color: css("--series-1"), text: "C" });
     } else {
-      markers.push({ time: t + TZ_SHIFT, position: "aboveBar", shape: "arrowDown",
+      markers.push({ time: t, position: "aboveBar", shape: "arrowDown",
                      color: m.net >= 0 ? css("--good") : css("--critical"),
                      text: "V " + fmtUsd(m.net, 0) });
     }
@@ -184,16 +220,15 @@ function updateLegend(param) {
   if (!lastCandles || !lastCandles.bars.length) return;
   let bar = null;
   if (param && param.time !== undefined && param.seriesData) bar = param.seriesData.get(candleSeries);
-  if (!bar) {
-    const b = lastCandles.bars[lastCandles.bars.length - 1];
-    bar = { ...b, time: b.time + TZ_SHIFT };
-  }
+  if (!bar) bar = lastCandles.bars[lastCandles.bars.length - 1];
   const ohlc = el("span", { cls: "key" }, [
     "A ", el("b", { text: fmtNum(bar.open) }), " M ", el("b", { text: fmtNum(bar.high) }),
     " m ", el("b", { text: fmtNum(bar.low) }), " F ", el("b", { text: fmtNum(bar.close) }),
   ]);
   legend.append(ohlc);
-  Object.keys(indicatorSeries).forEach((name, i) => {
+  // Same order as renderCandles uses for the line colors
+  Object.keys(lastCandles.indicators).forEach((name, i) => {
+    if (!indicatorSeries[name]) return;
     let v = null;
     if (param && param.seriesData) {
       const p = param.seriesData.get(indicatorSeries[name]);
@@ -213,13 +248,15 @@ function renderEquity(curve) {
   const pts = [];
   let lastT = -Infinity;
   for (const p of curve) {
-    let t = Math.floor(p.time) + TZ_SHIFT;
+    let t = loc(Math.floor(p.time));
     if (t <= lastT) t = lastT + 1;            // strictly increasing times
     pts.push({ time: t, value: p.value });
     lastT = t;
   }
   equitySeries.setData(pts);
-  equityChart.timeScale().fitContent();
+  // Re-fit only when a trade adds a point, not on every refresh (keeps zoom)
+  if (pts.length !== equityPoints) equityChart.timeScale().fitContent();
+  equityPoints = pts.length;
 }
 
 // ---------------------------------------------------------------- panels
@@ -277,16 +314,19 @@ function renderBot(b) {
     );
   }
 
+  const pr = b.params || {};
   const pos = $("position");
   pos.replaceChildren();
   const kv = (k, v, cls = "") => { pos.append(el("dt", { text: k }), el("dd", { text: v, cls })); };
   const p = b.position;
+  const base = ((lastCandles && lastCandles.symbol) || "BTC/USDT").split("/")[0];
   if (!p) {
     kv("Situação", "Sem posição");
-    kv("Aguardando", "rompimento do canal");
+    kv("Aguardando", pr.strategy === "trend_v4"
+      ? `rompimento da máxima de ${pr.donchian_entry ?? 20}` : "MME 9 cruzar acima da MM 20");
   } else {
     kv("Lado", "Comprado");
-    kv("Quantidade", fmtNum(p.size, 6) + " BTC");
+    kv("Quantidade", `${fmtNum(p.size, 6)} ${base}`);
     kv("Entrada", fmtNum(p.entry_price));
     kv("Preço atual", fmtNum(p.mark_price));
     kv("Stop", fmtNum(p.stop_price));
@@ -297,7 +337,6 @@ function renderBot(b) {
 
   const params = $("params");
   params.replaceChildren();
-  const pr = b.params || {};
   $("strategy-name").textContent = pr.strategy || "";
   const rows = pr.strategy === "trend_v4" ? [
     ["Candle", pr.timeframe],
@@ -449,19 +488,48 @@ async function refreshTab() {
   try { await loader(); } catch (e) { console.warn(e); }
 }
 
-let lastOk = null;
+let lastOk = null, failed = [];
+
+function showStatusError(e) {
+  $("pills").replaceChildren(el("span", { cls: "pill bad" }, [el("span", { cls: "dot" }), "status " + failText(e)]));
+}
+
+function showBotError(e) {
+  $("perf-sub").textContent = "dados " + failText(e);
+}
+
+function showCandlesError(e) {
+  $("chart-sub").textContent = "gráfico " + failText(e);
+}
+
+// Each part loads and renders on its own: one failing endpoint must not
+// blank or freeze the rest of the panel
+const PARTS = [
+  { path: "status", label: "status", render: renderStatus, fail: showStatusError },
+  { path: "candles?limit=500", label: "gráfico", render: renderCandles, fail: showCandlesError },
+  { path: "bot", label: "robô", render: (b) => { $("perf-sub").textContent = "desde o início da sessão"; renderBot(b); },
+    fail: showBotError },
+];
 
 async function refresh() {
   document.body.classList.add("loading");
   try {
-    const [status, bot, candles] = await Promise.all([api("status"), api("bot"), api("candles?limit=500")]);
-    renderStatus(status);
-    renderCandles(candles);
-    renderBot(bot);
+    const results = await Promise.allSettled(PARTS.map((part) => api(part.path)));
+    const bad = [];
+    results.forEach((r, i) => {
+      const part = PARTS[i];
+      try {
+        if (r.status !== "fulfilled") throw r.reason;
+        part.render(r.value);
+      } catch (e) {
+        console.warn(e);
+        bad.push(part.label);
+        try { part.fail(e); } catch (_) { /* keep going */ }
+      }
+    });
     await refreshTab();
-    lastOk = Date.now();
-  } catch (e) {
-    console.warn(e);
+    if (bad.length < PARTS.length) lastOk = Date.now();
+    failed = bad;
   } finally {
     document.body.classList.remove("loading");
     tickUpdated();
@@ -472,7 +540,9 @@ function tickUpdated() {
   const u = $("updated");
   if (lastOk == null) { u.textContent = "sem conexão com o painel"; return; }
   const age = (Date.now() - lastOk) / 1000;
-  u.textContent = age > REFRESH_MS / 1000 * 2.5 ? `sem atualizar há ${fmtAge(age)}` : `atualizado há ${fmtAge(age)}`;
+  let text = age > REFRESH_MS / 1000 * 2.5 ? `sem atualizar há ${fmtAge(age)}` : `atualizado há ${fmtAge(age)}`;
+  if (failed.length) text += ` · falhou: ${failed.join(", ")}`;
+  u.textContent = text;
 }
 
 function init() {
