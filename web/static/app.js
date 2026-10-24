@@ -29,6 +29,10 @@ const fmtNum = (v, d = 2) => (v == null ? "—" : nf(d).format(v));
 const fmtUsd = (v, d = 2) => (v == null ? "—" : "US$ " + nf(d).format(v));
 const fmtPct = (v, d = 2, sign = true) =>
   v == null ? "—" : (sign && v > 0 ? "+" : "") + nf(d).format(v * 100) + "%";
+// Decimals that fit the coin's price: BTC 80.340,13, DOGE 0,08123
+let pxDec = 2;
+const decFor = (p) => (!p ? 2 : p >= 100 ? 2 : p >= 1 ? 4 : p >= 0.01 ? 5 : 8);
+const fmtPx = (v) => fmtNum(v, pxDec);
 const signCls = (v) => (v == null || v === 0 ? "" : v > 0 ? "pos" : "neg");
 
 function fmtTime(epoch, withYear = false) {
@@ -118,7 +122,7 @@ function chartOptions() {
     rightPriceScale: { borderColor: css("--axis") },
     timeScale: { borderColor: css("--axis"), timeVisible: true, secondsVisible: false },
     crosshair: { mode: LWC.CrosshairMode.Normal },
-    localization: { locale: "pt-BR", priceFormatter: (p) => nf(2).format(p) },
+    localization: { locale: "pt-BR", priceFormatter: (p) => nf(pxDec).format(p) },
   };
 }
 
@@ -164,6 +168,9 @@ function renderCandles(c) {
   $("chart-sub").textContent = `${c.bars.length} candles fechados que o robô processou`;
   const times = c.bars.map((b) => b.time);
   const disp = displayTimes(times);
+  pxDec = decFor(c.bars[c.bars.length - 1].close);
+  const priceFormat = { type: "price", precision: pxDec, minMove: 1 / 10 ** pxDec };
+  candleSeries.applyOptions({ priceFormat });
   candleSeries.setData(c.bars.map((b) => ({ ...b, time: disp.get(b.time) })));
 
   names.forEach((name, i) => {
@@ -173,7 +180,7 @@ function renderCandles(c) {
       });
     }
     // Color follows the position in the list every time, like the legend
-    indicatorSeries[name].applyOptions({ color: css(SERIES_VARS[i % SERIES_VARS.length]) });
+    indicatorSeries[name].applyOptions({ color: css(SERIES_VARS[i % SERIES_VARS.length]), priceFormat });
     indicatorSeries[name].setData(c.indicators[name].filter((p) => disp.has(p.time))
       .map((p) => ({ time: disp.get(p.time), value: p.value })));
   });
@@ -225,8 +232,8 @@ function updateLegend(param) {
   if (param && param.time !== undefined && param.seriesData) bar = param.seriesData.get(candleSeries);
   if (!bar) bar = lastCandles.bars[lastCandles.bars.length - 1];
   const ohlc = el("span", { cls: "key" }, [
-    "A ", el("b", { text: fmtNum(bar.open) }), " M ", el("b", { text: fmtNum(bar.high) }),
-    " m ", el("b", { text: fmtNum(bar.low) }), " F ", el("b", { text: fmtNum(bar.close) }),
+    "A ", el("b", { text: fmtPx(bar.open) }), " M ", el("b", { text: fmtPx(bar.high) }),
+    " m ", el("b", { text: fmtPx(bar.low) }), " F ", el("b", { text: fmtPx(bar.close) }),
   ]);
   legend.append(ohlc);
   // Same order as renderCandles uses for the line colors
@@ -242,7 +249,7 @@ function updateLegend(param) {
       v = arr && arr.length ? arr[arr.length - 1].value : null;
     }
     legend.append(el("span", { cls: "key" }, [
-      el("span", { cls: `swatch s${(i % 3) + 1}` }), name + " ", el("b", { text: fmtNum(v) }),
+      el("span", { cls: `swatch s${(i % 3) + 1}` }), name + " ", el("b", { text: fmtPx(v) }),
     ]));
   });
 }
@@ -390,7 +397,8 @@ function tile(label, value, hint, cls = "") {
 
 function renderBot(b) {
   const hbPrice = b.heartbeat && b.heartbeat.price;
-  $("px").textContent = hbPrice != null ? fmtNum(hbPrice) : "—";
+  if (!lastCandles || !lastCandles.bars.length) pxDec = decFor(hbPrice);
+  $("px").textContent = hbPrice != null ? fmtPx(hbPrice) : "—";
   $("sym").textContent = b.symbol || "—";
   const tiles = $("tiles");
   tiles.replaceChildren();
@@ -423,9 +431,9 @@ function renderBot(b) {
   } else {
     kv("Lado", "Comprado");
     kv("Quantidade", `${fmtNum(p.size, 6)} ${base}`);
-    kv("Entrada", fmtNum(p.entry_price));
-    kv("Preço atual", fmtNum(p.mark_price));
-    kv("Stop", fmtNum(p.stop_price));
+    kv("Entrada", fmtPx(p.entry_price));
+    kv("Preço atual", fmtPx(p.mark_price));
+    kv("Stop", fmtPx(p.stop_price));
     kv("Resultado aberto", `${fmtUsd(p.unrealized)} (${fmtPct(p.unrealized_pct)})`, signCls(p.unrealized));
   }
   if (b.halted) kv("Circuit breaker", "ACIONADO", "neg");
@@ -459,8 +467,8 @@ function renderTrades(trades) {
   }
   const rows = trades.slice().reverse().map((t, i) => [
     trades.length - i,
-    fmtTime(t.entry_time, true), fmtNum(t.entry_price),
-    fmtTime(t.exit_time, true), fmtNum(t.exit_price),
+    fmtTime(t.entry_time, true), fmtPx(t.entry_price),
+    fmtTime(t.exit_time, true), fmtPx(t.exit_price),
     { text: fmtUsd(t.net), cls: signCls(t.net) },
     { text: fmtPct(t.net_pct), cls: signCls(t.net) },
     fmtDuration(t.entry_time && t.exit_time ? t.exit_time - t.entry_time : null),

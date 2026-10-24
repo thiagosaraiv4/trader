@@ -76,6 +76,12 @@ def _configure_headless_logging() -> logging.Logger:
 log = _configure_headless_logging()
 
 
+def _px(price: float) -> float:
+    """Price for the logs with 6 significant digits: 2 decimals would turn
+    DOGE at 0.0812 into 0.08."""
+    return float(f"{price:.6g}")
+
+
 # ---------------------------------------------------------------------------
 # HeadlessTradingBot
 # ---------------------------------------------------------------------------
@@ -246,7 +252,7 @@ class HeadlessTradingBot:
                 "component": "headless",
                 "symbol": str(self._cfg.default_symbol),
                 "side": result.side,
-                "price": round(result.fill_price, 2),
+                "price": _px(result.fill_price),
                 "qty": round(result.fill_quantity, 6),
                 "commission": round(result.commission, 4),
                 "balance": round(self._core.balance, 2),
@@ -551,7 +557,7 @@ class HeadlessTradingBot:
             "heartbeat",
             extra={
                 "component": "headless",
-                "price": round(self._core._last_price, 2),
+                "price": _px(self._core._last_price),
                 "bars": self._bar_count,
                 "position": self._core.position.side,
                 "balance": round(self._core.balance, 2),
