@@ -247,6 +247,13 @@ moderado o retorno médio cai de +74% para +56% e todas as moedas seguem positiv
 risco por trade deu a melhor relação retorno/queda; o teto de risco aberto quase não muda nada,
 porque o limite sem alavancagem (soma das posições ≤ patrimônio) já trava antes.
 
+`run_stop_study.py` mede o teto de 95% (limitou só 4% dos trades; 23% no TRX, que oscila pouco)
+e a distância dos stops. Os vencedores caíram em mediana 0,8 ATR antes de dar lucro (10% passaram
+de 2 ATR), então o stop inicial de 3 ATR tem folga e stops mais curtos pioram. Já o stop móvel de
+4 ATR corta tendências cedo: com custos realistas, alargá-lo melhorou tudo, nas 9 moedas e nas 11
+de fora do robô, nas duas metades — 4 ATR: +56% (PF 1,35); 12: +122% (1,61); 50 (na prática
+desligado, saída só pela mínima de 10): +196% (1,76). Nas 11 moedas de fora: +8% → +41%.
+
 As moedas sobem e caem juntas: os robôs tendem a comprar na mesma alta e perder na mesma
 queda. Somadas numa conta só, seriam ~4 × 2% de risco ao mesmo tempo — para dinheiro real,
 dividir o risco por trade entre as moedas.
