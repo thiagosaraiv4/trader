@@ -514,6 +514,9 @@ class HeadlessTradingBot:
         )
 
         await self._feed.start()
+        # Write the session right away: a fresh one (e.g. after a parameter
+        # change archived the old) is otherwise only saved after 5 min
+        self.save()
 
         # Start periodic save task
         save_task = asyncio.create_task(self._periodic_save())

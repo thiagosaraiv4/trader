@@ -251,9 +251,19 @@ def strategy_params(b: dict | None = None) -> dict:
     strategy.json, else the repository's."""
     b = b or get_bot()
     stored = _dict(_dict(_dict(_session(b)).get("meta")).get("strategy_params"))
-    if stored:
+    if not stored:
+        stored = _read_json(b["dir"] / "strategy.json") or _read_json(PARAMS_PATH) or {}
+    return _with_defaults(stored)
+
+
+def _with_defaults(stored: dict) -> dict:
+    """Keys missing from strategy.json take the strategy's defaults, exactly
+    as the bot does (core.strategy_params)."""
+    try:
+        from core.strategy_params import StrategyParams
+        return StrategyParams.from_dict(stored).to_dict()
+    except Exception:  # noqa: BLE001 — show what the file has
         return stored
-    return _read_json(b["dir"] / "strategy.json") or _read_json(PARAMS_PATH) or {}
 
 
 def _pair_fills(trade_log: list[dict]) -> tuple[list[dict], dict | None]:
