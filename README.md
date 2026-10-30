@@ -239,6 +239,14 @@ espere delas, ao vivo, algo mais perto da média (fator ~1,25).
 Candles menores dão mais trades e perdem: no mesmo teste, 1h ficou perto do zero com quedas de
 36–72%, e 15 min perdeu ~98% em todas as moedas (taxas e falsos rompimentos).
 
+`run_portfolio_study.py` refaz o backtest das 9 moedas com custos realistas (taxa 0,2% e
+escorregamento de 0,05–0,1% a mercado e 0,2–0,5% nos stops) e simula uma conta única para todas,
+com risco por trade e teto de risco aberto. Resultado (dez/2020 → out/2026): com escorregamento
+moderado o retorno médio cai de +74% para +56% e todas as moedas seguem positivas; no estresse
+(taxa 0,2% + escorregamento alto) cai para +21% e o TRX fica negativo. Numa conta única, 0,5% de
+risco por trade deu a melhor relação retorno/queda; o teto de risco aberto quase não muda nada,
+porque o limite sem alavancagem (soma das posições ≤ patrimônio) já trava antes.
+
 As moedas sobem e caem juntas: os robôs tendem a comprar na mesma alta e perder na mesma
 queda. Somadas numa conta só, seriam ~4 × 2% de risco ao mesmo tempo — para dinheiro real,
 dividir o risco por trade entre as moedas.

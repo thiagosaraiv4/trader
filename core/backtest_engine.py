@@ -76,6 +76,8 @@ class TradeLog:
     exit_reason: str = "unknown"
     position_usd: float = 0.0
     balance_after: float = 0.0  # cash after the closing fill (net of fees)
+    initial_stop: float = 0.0   # hard stop when the position opened
+    quantity: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,6 +610,7 @@ class BacktestEngine:
                     "side": pos.side,
                     "position_usd": pos.size * pos.entry_price,
                     "stop0": pos.trailing_stop_price,
+                    "qty": pos.size,
                 }
             elif prev_side != "FLAT" and pos.side == "FLAT" and current_entry is not None:
                 if algo_closed:
@@ -628,6 +631,8 @@ class BacktestEngine:
                     exit_reason=exit_reason,
                     position_usd=current_entry["position_usd"],
                     balance_after=paper_engine.balance,
+                    initial_stop=current_entry["stop0"],
+                    quantity=current_entry["qty"],
                 ))
                 current_entry = None
 
@@ -810,6 +815,8 @@ class BacktestEngine:
                     exit_reason="end_of_data",
                     position_usd=current_entry["position_usd"],
                     balance_after=paper_engine.balance,
+                    initial_stop=current_entry["stop0"],
+                    quantity=current_entry["qty"],
                 ))
 
         # --- Calculate metrics ---
