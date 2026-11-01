@@ -137,6 +137,8 @@ function initCharts() {
   priceChart.subscribeCrosshairMove(updateLegend);
 
   equityChart = LWC.createChart($("equity-chart"), chartOptions());
+  // Money: always 2 decimals, whatever the coin's price needs
+  equityChart.applyOptions({ localization: { locale: "pt-BR", priceFormatter: (p) => nf(2).format(p) } });
   equitySeries = equityChart.addLineSeries({
     color: css("--series-1"), lineWidth: 2, priceLineVisible: false,
     lastValueVisible: true, crosshairMarkerRadius: 4,
