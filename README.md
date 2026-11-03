@@ -4,6 +4,8 @@ Plataforma de trading algorítmico com paper trading, indicadores técnicos incr
 
 Suporta dois modos de execução: **Desktop (UI)** e **Headless (Cloud/Codespaces)**.
 
+> **Aviso:** o robô usa dados de mercado ao vivo da Binance (com fallback para Bybit e Kraken), mas só simula as ordens. Não envia ordens reais e não usa chave de API. É um projeto de estudo, não uma recomendação de investimento.
+
 ---
 
 ## Arquitetura
